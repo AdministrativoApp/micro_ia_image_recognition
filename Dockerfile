@@ -1,42 +1,31 @@
-# Use Python 3.11 slim image as base
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies needed for OpenCV and image processing
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
+    build-essential \
+    ffmpeg \
     libsm6 \
     libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    libgthread-2.0-0 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
     libgtk-3-0 \
-    libavcodec-dev \
-    libavformat-dev \
-    libswscale-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (for better Docker layer caching)
+# Copy requirements and install
 COPY requirements.txt .
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
+# Copy the project files
 COPY . .
 
-# Create features directory
+# Create required folder
 RUN mkdir -p features
 
-# Expose port
-EXPOSE 8000
-
-# Set environment variables
-ENV PYTHONPATH=/app
+# Set environment
 ENV PYTHONUNBUFFERED=1
 
-# Command to run the application
+EXPOSE 8000
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
