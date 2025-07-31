@@ -10,8 +10,22 @@ from typing import List
 app = FastAPI(
     title="Product Recognition API",
     description="Scan and add products using webcam-like logic with face/hands blurring.",
-    version="1.0.0"
+    version="1.0.0",
+    root_path="/despacho" 
 )
+
+# Add root endpoint
+@app.get("/")
+async def root():
+    return {
+        "message": "Product Recognition API is running",
+        "endpoints": {
+            "docs": "/docs",
+            "redoc": "/redoc",
+            "scan": "/scan",
+            "add": "/add"
+        }
+    }
 
 scanner = ProductScannerSQL(db_url=db_url)
 scanner.train()  # optional preload (lazy retrain inside .recognize anyway)
@@ -77,7 +91,7 @@ async def add_product(
         raise HTTPException(status_code=500, detail="❌ Failed to store any product images")
 
 
-# Run the FastAPI app with: uvicorn main:app --reload
+# Run the FastAPI app with: 
 # ✅ 3. Example cURL (Frontend can mimic this)
 # curl -X POST "http://localhost:8000/scan" -F "file=@your_image.jpg"
 # ✅ Example cURL to Add a Product Image
