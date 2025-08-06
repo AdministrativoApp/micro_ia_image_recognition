@@ -2,29 +2,16 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Update package lists and install essential packages in separate steps
-RUN apt-get update
-
-# Install core dependencies first
-RUN apt-get install -y \
+# Install system dependencies needed for OpenCV and image processing
+RUN apt-get update && apt-get install -y \
     build-essential \
-    cmake \
-    pkg-config \
-    wget \
-    curl
-
-# Install OpenCV dependencies
-RUN apt-get install -y \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
+    ffmpeg \
     libsm6 \
     libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    libgthread-2.0-0
-
-# Clean up
-RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install
 COPY requirements.txt .
