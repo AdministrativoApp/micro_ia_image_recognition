@@ -1,0 +1,31 @@
+version: '3.9'
+
+services:
+  micro-ia:
+    image: andresdom2004/micro_ia_image_recognition:latest
+    container_name: micro_ia
+    restart: always
+    ports:
+      - "8000:8000"  # expose FastAPI port
+    env_file:
+      - .env  # ✅ Read variables like DB_USER, DB_PASSWORD, etc.
+    volumes:
+      - ./features:/app/features  # persist feature vectors
+    networks:
+      - app-network
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=360
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

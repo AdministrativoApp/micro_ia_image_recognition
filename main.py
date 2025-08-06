@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import cv2
 import io
@@ -12,6 +13,15 @@ app = FastAPI(
     description="Scan and add products using webcam-like logic with face/hands blurring.",
     version="1.0.0",
     root_path="/despacho" 
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "https://develop.globaldv.tech"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Add root endpoint
