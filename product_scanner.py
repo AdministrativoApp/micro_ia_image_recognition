@@ -31,6 +31,9 @@ PORT = os.getenv('DB_PORT')
 db_url = f"postgresql://{USER}:{PASSWORD}@{HOST}:{PORT}/{DATABASE}"
 
 def mask_humans(img):
+    if img is None or img.size == 0:
+        raise ValueError("❌ mask_humans: Received empty image.")
+
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     masked_img = img.copy()
     h, w, _ = img.shape
@@ -59,6 +62,7 @@ def mask_humans(img):
             masked_img[y1:y2, x1:x2] = cv2.GaussianBlur(masked_img[y1:y2, x1:x2], (55, 55), 30)
 
     return masked_img
+
 
 
 # Global mediapipe objects (initialized once)
@@ -95,8 +99,9 @@ class ProductScannerSQL:
         self.conn.commit()
 
     def preprocess_frame(self, img_array):
-    # Ensures proper preprocessing for any input: resizing, masking, and normalization
-    # Convert to BGR if image is grayscale or RGBA
+        if img_array is None or img_array.size == 0:
+            raise ValueError("❌ preprocess_frame: Received empty image.")
+
         if len(img_array.shape) == 2 or img_array.shape[2] == 1:
             img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
         elif img_array.shape[2] == 4:
@@ -205,12 +210,24 @@ class ProductScannerSQL:
             return None
 
         label = self.y[indices[0][0]]
-        confidence = 1 - distances[0][0]
-        return label, confidence
+        confidence = float(1 - distances[0][0])  # Convert numpy.float32 to Python float
+        return {"label": label, "confidence": confidence}  # Return a dict instead of a tuple
 
 
 
 def main():
+    # Check if running in headless environment
+    try:
+        import os
+        if os.environ.get('DISPLAY') is None and os.name != 'nt':
+            print("⚠️ Running in headless environment. GUI features disabled.")
+            print("🚀 Use the FastAPI endpoints instead:")
+            print("   - POST /scan - Scan a product")
+            print("   - POST /add - Add a new product")
+            return
+    except:
+        pass
+
     scanner = ProductScannerSQL(db_url=db_url)  # 👈 Use the updated class
 
     cap = cv2.VideoCapture(0)
@@ -232,7 +249,13 @@ def main():
             break
 
         filtered_frame = mask_humans(frame)
-        cv2.imshow('Product Scanner', filtered_frame)
+        
+        # Try to show image, but handle headless environments gracefully
+        try:
+            cv2.imshow('Product Scanner', filtered_frame)
+        except cv2.error as e:
+            print("⚠️ Cannot display video (headless environment). Use FastAPI endpoints instead.")
+            break
 
 
         key = cv2.waitKey(1) & 0xFF  # Mask high bits to ensure proper ASCII
@@ -241,8 +264,7 @@ def main():
             result = scanner.recognize(frame)
             print(result)
             if result:
-                name, confidence = result
-                print(f"\n✅ Product recognized: {name} | Confidence: {confidence:.2f}\n")
+                print(f"\n✅ Product recognized: {result['label']} | Confidence: {result['confidence']:.2f}\n")
             else:
                 print("\n❌ Product not recognized.")
                 choice = input("Do you want to store this product? (y/n): ").strip().lower()
@@ -308,3 +330,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

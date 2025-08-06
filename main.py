@@ -18,7 +18,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "https://develop.globaldv.tech"],
+    allow_origins=["http://localhost:5173", "http://localhost:8000", "https://develop.globaldv.tech"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,18 +47,30 @@ def read_imagefile(file_bytes) -> np.ndarray:
 @app.post("/scan")
 async def scan_product(file: UploadFile = File(...)):
     try:
+        # Read the uploaded file
         contents = await file.read()
-        img_array = read_imagefile(contents)
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # 🔐 Apply face/hands blur before recognition
-        filtered = mask_humans(img_array)
-        result = scanner.recognize(filtered)
+        if img is None:
+            raise HTTPException(status_code=400, detail="Invalid image file")
 
-        if result:
-            name, confidence = result
-            return {"recognized": True, "product": name, "confidence": round(confidence, 2)}
-        else:
-            return {"recognized": False, "message": "Product not recognized"}
+        # Recognize the product
+        result = scanner.recognize(img)
+        if not result:
+            return JSONResponse(
+                content={"recognized": False, "message": "Product not recognized"},
+                status_code=200
+            )
+
+        return JSONResponse(
+            content={
+                "recognized": True,
+                "product": result["label"],
+                "confidence": result["confidence"]
+            }
+        )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -108,3 +120,5 @@ async def add_product(
 # curl -X POST "http://localhost:8000/add" \
 #  -F "product_name=Logitech Mouse M325" \
 #  -F "file=@logitech_m325_view1.jpg"
+# To run it locally:
+# uvicorn main:app --reload
