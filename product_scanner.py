@@ -94,6 +94,20 @@ class ProductScannerSQL:
         """)
         self.conn.commit()
 
+    def preprocess_frame(self, img_array):
+    # Ensures proper preprocessing for any input: resizing, masking, and normalization
+    # Convert to BGR if image is grayscale or RGBA
+        if len(img_array.shape) == 2 or img_array.shape[2] == 1:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        elif img_array.shape[2] == 4:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+
+        masked = mask_humans(img_array)
+        resized = cv2.resize(masked, (224, 224))
+        arr = image.img_to_array(resized)
+        arr = np.expand_dims(arr, axis=0)
+        return preprocess_input(arr)
+
     def process_image(self, img):
         img = cv2.resize(img, (224, 224))
         img_array = image.img_to_array(img)
@@ -101,12 +115,14 @@ class ProductScannerSQL:
         return preprocess_input(img_array)
 
     def add_product(self, product_name, img_array):
-        self.cursor.execute("INSERT INTO products (name) VALUES (%s) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id", (product_name,))
+        self.cursor.execute(
+            "INSERT INTO products (name) VALUES (%s) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id",
+            (product_name,))
         product_id = self.cursor.fetchone()[0]
 
-        filtered = mask_humans(img_array)
-        processed = self.process_image(filtered)
+        processed = self.preprocess_frame(img_array)
         features = self.feature_extractor.predict(processed)[0]
+
         vector_id = str(uuid.uuid4())
         file_path = os.path.join(self.features_dir, f"{vector_id}.joblib")
         joblib.dump(features, file_path)
@@ -178,8 +194,7 @@ class ProductScannerSQL:
             if not self.train():
                 return None
 
-        filtered = mask_humans(img_array)
-        processed = self.process_image(filtered)
+        processed = self.preprocess_frame(img_array)
         features = self.feature_extractor.predict(processed)[0]
 
         if hasattr(self, 'use_pca') and self.use_pca:
