@@ -87,7 +87,8 @@ class ProductScannerSQL:
         CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
         CREATE TABLE IF NOT EXISTS products (
             id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            name TEXT NOT NULL UNIQUE
+            name TEXT NOT NULL UNIQUE,
+            sku TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS product_vectors (
             id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -119,10 +120,10 @@ class ProductScannerSQL:
         img_array = np.expand_dims(img_array, axis=0)
         return preprocess_input(img_array)
 
-    def add_product(self, product_name, img_array):
+    def add_product(self, product_name, product_sku, img_array):
         self.cursor.execute(
-            "INSERT INTO products (name) VALUES (%s) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id",
-            (product_name,))
+            "INSERT INTO products (name, sku) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name, sku=EXCLUDED.sku RETURNING id",
+            (product_name, product_sku))
         product_id = self.cursor.fetchone()[0]
 
         processed = self.preprocess_frame(img_array)
