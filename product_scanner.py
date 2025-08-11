@@ -17,8 +17,13 @@ import mediapipe as mp
 
 mp_face = mp.solutions.face_detection
 mp_hands = mp.solutions.hands
-mp_hands_detection = mp_hands.Hands(static_image_mode=True, max_num_hands=2)
-
+# Initialize hands detection with specific dimensions
+mp_hands_detection = mp_hands.Hands(
+    static_image_mode=True,
+    max_num_hands=2,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 
 load_dotenv()
 
@@ -34,9 +39,15 @@ def mask_humans(img):
     if img is None or img.size == 0:
         raise ValueError("❌ mask_humans: Received empty image.")
 
+    h, w, _ = img.shape
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     masked_img = img.copy()
-    h, w, _ = img.shape
+    
+    # Normalize image for mediapipe processing
+    mp_img = mp.Image(
+        image_format=mp.ImageFormat.SRGB,
+        data=img_rgb
+    )
 
     # Detect and blur face
     results = mp_face_detection.process(img_rgb)
@@ -49,12 +60,13 @@ def mask_humans(img):
             y2 = y1 + int(bbox.height * h)
             masked_img[y1:y2, x1:x2] = cv2.GaussianBlur(masked_img[y1:y2, x1:x2], (55, 55), 30)
 
-    # Detect and blur hands
+    # Detect and blur hands with image dimensions context
     hand_results = mp_hands_detection.process(img_rgb)
-    if hand_results.multi_hand_landmarks:
+    if hand_results and hand_results.multi_hand_landmarks:
         for hand_landmarks in hand_results.multi_hand_landmarks:
-            x_coords = [lm.x for lm in hand_landmarks.landmark]
-            y_coords = [lm.y for lm in hand_landmarks.landmark]
+            # Convert normalized coordinates to pixel coordinates
+            x_coords = [int(lm.x * w) for lm in hand_landmarks.landmark]
+            y_coords = [int(lm.y * h) for lm in hand_landmarks.landmark]
             x1 = max(int(min(x_coords) * w) - 10, 0)
             y1 = max(int(min(y_coords) * h) - 10, 0)
             x2 = min(int(max(x_coords) * w) + 10, w)
@@ -121,26 +133,43 @@ class ProductScannerSQL:
         return preprocess_input(img_array)
 
     def add_product(self, product_name, product_sku, img_array):
-        self.cursor.execute(
-            "INSERT INTO products (name, sku) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name, sku=EXCLUDED.sku RETURNING id",
-            (product_name, product_sku))
-        product_id = self.cursor.fetchone()[0]
+        try:
+            # Create product or update if exists
+            self.cursor.execute(
+                "INSERT INTO products (name, sku) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name, sku=EXCLUDED.sku RETURNING id",
+                (product_name, product_sku))
+            product_id = self.cursor.fetchone()[0]
 
-        processed = self.preprocess_frame(img_array)
-        features = self.feature_extractor.predict(processed)[0]
+            # Process image and extract features
+            processed = self.preprocess_frame(img_array)
+            features = self.feature_extractor.predict(processed)[0]
 
-        vector_id = str(uuid.uuid4())
-        file_path = os.path.join(self.features_dir, f"{vector_id}.joblib")
-        joblib.dump(features, file_path)
+            # Generate unique identifier
+            vector_id = str(uuid.uuid4())
+            
+            # Save both feature vector and original image
+            feature_path = os.path.join(self.features_dir, f"{vector_id}_feature.joblib")
+            image_path = os.path.join(self.features_dir, f"{vector_id}_image.jpg")
+            
+            # Save files
+            joblib.dump(features, feature_path)
+            cv2.imwrite(image_path, img_array)
 
-        self.cursor.execute(
-            "INSERT INTO product_vectors (id, product_id, file_path, created_at) VALUES (%s, %s, %s, %s)",
-            (vector_id, product_id, file_path, datetime.now())
-        )
-        self.conn.commit()
-        self.is_trained = False
-        print(f"✅ Added vector to product: {product_name}")
-        return True
+            # Store in database
+            self.cursor.execute(
+                "INSERT INTO product_vectors (id, product_id, file_path, created_at) VALUES (%s, %s, %s, %s)",
+                (vector_id, product_id, feature_path, datetime.now())
+            )
+            
+            self.conn.commit()
+            self.is_trained = False
+            print(f"✅ Added vector to product: {product_name} (SKU: {product_sku})")
+            return True
+            
+        except Exception as e:
+            self.conn.rollback()
+            print(f"❌ Error adding product: {str(e)}")
+            return False
 
     def train(self):
         self.cursor.execute("""
@@ -271,8 +300,9 @@ def main():
                 choice = input("Do you want to store this product? (y/n): ").strip().lower()
                 if choice == 'y':
                     product_name = input("Enter product name (e.g., 'Victoria Secret 250ml'): ").strip()
-                    if product_name:
-                        print(f"📸 Please capture at least 5 different views of '{product_name}'. Press [SPACE] to capture each photo. Press [ESC] to cancel.")
+                    product_sku = input("Enter product SKU: ").strip()
+                    if product_name and product_sku:
+                        print(f"📸 Please capture at least 5 different views of '{product_name}' (SKU: {product_sku}). Press [SPACE] to capture each photo. Press [ESC] to cancel.")
                         captured = 0
 
                         while captured < 5:
@@ -290,7 +320,7 @@ def main():
 
                             key_inner = cv2.waitKey(1)
                             if key_inner == 32:  # SPACE key
-                                if scanner.add_product(product_name, img_array=frame):
+                                if scanner.add_product(product_name, product_sku, frame):
                                     print(f"✅ View {captured + 1} saved.")
                                     captured += 1
                             elif key_inner == 27:  # ESC key
@@ -309,11 +339,14 @@ def main():
 
         elif key == ord('a'):
             product_name = input("Enter product name: ").strip()
-            if product_name:
-                if scanner.add_product(product_name, img_array=frame):
-                    print(f"✅ Image added to product '{product_name}'")
+            product_sku = input("Enter product SKU: ").strip()
+            if product_name and product_sku:
+                if scanner.add_product(product_name, product_sku, frame):
+                    print(f"✅ Image added to product '{product_name}' (SKU: {product_sku})")
                 else:
                     print("❌ Failed to add product.")
+            else:
+                print("❌ Both product name and SKU are required.")
 
         elif key == ord('q'):
             break

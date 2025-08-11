@@ -41,8 +41,18 @@ scanner = ProductScannerSQL(db_url=db_url)
 scanner.train()  # optional preload (lazy retrain inside .recognize anyway)
 
 def read_imagefile(file_bytes) -> np.ndarray:
-    image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    try:
+        # Try using OpenCV first
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is not None:
+            return img
+        
+        # Fallback to PIL if OpenCV fails
+        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        raise ValueError(f"Failed to read image: {str(e)}")
 
 @app.post("/scan")
 async def scan_product(file: UploadFile = File(...)):
@@ -77,8 +87,14 @@ async def scan_product(file: UploadFile = File(...)):
 @app.post("/add")
 async def add_product(
     product_name: str = Form(...),
+    product_sku: str = Form(...),
     files: List[UploadFile] = File(...)
 ):
+    # Input validation
+    if not product_name.strip():
+        raise HTTPException(status_code=400, detail="Product name is required")
+    if not product_sku.strip():
+        raise HTTPException(status_code=400, detail="Product SKU is required")
     if len(files) < 5:
         raise HTTPException(status_code=400, detail="At least 5 photos are required")
 
@@ -87,30 +103,63 @@ async def add_product(
 
     for idx, file in enumerate(files):
         try:
+            # Read and decode image
             contents = await file.read()
-            img_array = read_imagefile(contents)
+            nparr = np.frombuffer(contents, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            if img is None:
+                errors.append(f"Image {idx + 1}: Invalid image format")
+                continue
 
             # 🔐 Apply blur before saving
-            filtered = mask_humans(img_array)
-            success = scanner.add_product(product_name, filtered)
-            if success:
-                successes += 1
-        except Exception as e:
-            errors.append(f"Image {idx + 1}: {str(e)}")
+            try:
+                filtered = mask_humans(img)
+            except Exception as e:
+                print(f"Warning: Face/hand detection failed for image {idx + 1}: {str(e)}")
+                filtered = img  # Use original image if face/hand detection fails
+            
+            try:
+                success = scanner.add_product(product_name, product_sku, filtered)
+                if success:
+                    successes += 1
+                    print(f"✅ Successfully added image {idx + 1} for product {product_name} (SKU: {product_sku})")
+            except Exception as e:
+                error_msg = f"Failed to add image {idx + 1}: {str(e)}"
+                print(f"❌ {error_msg}")
+                errors.append(error_msg)
 
+        except Exception as e:
+            error_msg = f"Image {idx + 1}: {str(e)}"
+            print(f"❌ {error_msg}")
+            errors.append(error_msg)
+
+    # Return appropriate response based on results
     if successes == len(files):
-        return {
-            "success": True,
-            "message": f"✅ Product '{product_name}' stored with {successes} views"
-        }
+        return JSONResponse(
+            content={
+                "success": True,
+                "message": f"✅ Product '{product_name}' (SKU: {product_sku}) stored with {successes} views"
+            },
+            status_code=200
+        )
     elif successes > 0:
-        return {
-            "success": False,
-            "message": f"⚠️ Only {successes} out of {len(files)} images were saved",
-            "errors": errors
-        }
+        return JSONResponse(
+            content={
+                "success": True,
+                "message": f"⚠️ Partially successful: {successes} out of {len(files)} images were saved for '{product_name}' (SKU: {product_sku})",
+                "errors": errors
+            },
+            status_code=207  # Multi-Status
+        )
     else:
-        raise HTTPException(status_code=500, detail="❌ Failed to store any product images")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "❌ Failed to store any product images",
+                "errors": errors
+            }
+        )
 
 
 # Run the FastAPI app with: 
