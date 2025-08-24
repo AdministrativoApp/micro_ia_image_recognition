@@ -1,8 +1,7 @@
 FROM python:3.11-slim-bookworm
-
 WORKDIR /app
 
-# System deps — only runtime libs (no *-dev needed for pip wheels)
+# System runtime deps for OpenCV/MediaPipe; +git in case any deps are git-based
 RUN apt-get update -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -11,15 +10,16 @@ RUN apt-get update -y && \
         libgl1 \
         libglib2.0-0 \
         libgtk-3-0 \
+        git \
         pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-# If you use OpenCV, prefer the headless wheel in servers/containers
-# (no GUI backends; avoids extra deps). In requirements.txt, use:
-# opencv-python-headless>=4.9,<5
+# Install Python deps (use headless OpenCV, binary psycopg2, pin numpy<2 to avoid ABI surprises)
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
+# App files
 COPY . .
 RUN mkdir -p features
 
