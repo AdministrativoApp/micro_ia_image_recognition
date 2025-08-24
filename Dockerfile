@@ -11,12 +11,15 @@ RUN apt-get update -y && \
         libglib2.0-0 \
         libgtk-3-0 \
         git \
-        pkg-config && \
+        pkg-config \
+        gcc \
+        python3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python deps (use headless OpenCV, binary psycopg2, pin numpy<2 to avoid ABI surprises)
+# Install Python deps
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
+    pip install --no-cache-dir numpy==1.24.3 && \
     pip install --no-cache-dir -r requirements.txt
 
 # App files
