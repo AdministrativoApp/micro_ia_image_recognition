@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from collections import defaultdict
 import mediapipe as mp
 import base64, json, requests
+from collections import defaultdict, Counter
 
 # ---------------- Optional FAISS (ANN) ----------------
 _HAS_FAISS = False
@@ -238,148 +239,11 @@ def _multicrops(img):
     return [c for c in crops if c.size]
 
 
-def recognize(self, img_array):
-        if not self.is_trained and not self.train():
-            return None
-
-        # Build query vectors
-        q_payload = self._extract_payload(img_array)
-        q_coarse, q_fine = self._build_vectors(q_payload)
-        q_coarse_n = q_coarse.astype(np.float32)
-        q_coarse_n /= (np.linalg.norm(q_coarse_n) + 1e-8)
-        qf = q_fine / (np.linalg.norm(q_fine) + 1e-8)
-        q_tfidf = self.vectorizer.transform([q_payload["ocr_text"]]).astype(np.float32).toarray()[0]
-
-        # ---- Numeric cues from three sources: badge OCR, DeepSeek, global OCR ----
-        badge_percent = None
-        try:
-            badge_percent = read_badge_percent(self._label_roi(img_array))
-        except Exception:
-            pass
-
-        ds_percent = None; ds_volume = None
-        try:
-            ds = deepseek_read_label(self._crop_for_ds(img_array))
-            ds_percent = ds.get("percent"); ds_volume = ds.get("volume_ml")
-        except Exception:
-            pass
-
-        qn = q_payload["numeric"]
-        ocr_percent = qn[0] * 10.0 if qn[0] > 0 else None
-        ocr_volume  = qn[2] * 1000.0 if qn[2] > 0 else None
-
-        # Confidence-weighted fusion (badge > DS > OCR)
-        q_percent = None; q_percent_conf = 0.0
-        if badge_percent is not None:
-            q_percent, q_percent_conf = badge_percent, 0.95
-        elif ds_percent is not None:
-            q_percent, q_percent_conf = ds_percent, 0.80
-        elif ocr_percent is not None:
-            q_percent, q_percent_conf = ocr_percent, 0.60
-
-        q_volume = None; q_volume_conf = 0.0
-        if ds_volume is not None:
-            q_volume, q_volume_conf = ds_volume, 0.75
-        elif ocr_volume is not None:
-            q_volume, q_volume_conf = ocr_volume, 0.55
-
-        if q_percent is not None:
-            print(f"🔎 Fused %: {q_percent} (conf {q_percent_conf:.2f})")
-
-        # ANN retrieval (top-K)
-        K = min(100, len(self.X))
-        if _HAS_FAISS and self.faiss_index is not None:
-            sims, idx = self.faiss_index.search(q_coarse_n[None, :], K)
-            cand_idx = idx[0].tolist()
-            base_sims = sims[0].tolist()
-        else:
-            dist, idx = self.knn.kneighbors([q_coarse], n_neighbors=K)
-            cand_idx = idx[0].tolist()
-            base_sims = [1.0 - float(d) for d in dist[0].tolist()]
-
-        # Re-rank with generic penalty
-        PCT_TOL = 0.10  # 0.10% tolerance
-        ML_TOL  = 120.0
-
-        def score_candidate(i, base_sim):
-            rf = self.fine_bank_norm[i]
-            sim_visual = float(np.dot(qf, rf))
-
-            rt = self.tfidf_bank[i]
-            if np.linalg.norm(q_tfidf) > 0 and np.linalg.norm(rt) > 0:
-                sim_ocr = float(np.dot(q_tfidf, rt) /
-                                ((np.linalg.norm(q_tfidf)+1e-8)*(np.linalg.norm(rt)+1e-8)))
-            else:
-                sim_ocr = 0.0
-
-            rn = joblib.load(self.file_paths[i])["numeric"]
-            if np.linalg.norm(qn) > 0 and np.linalg.norm(rn) > 0:
-                sim_num = float(np.dot(qn, rn) /
-                                ((np.linalg.norm(qn)+1e-8)*(np.linalg.norm(rn)+1e-8)))
-            else:
-                sim_num = 0.0
-
-            # ref numeric in human units
-            r_percent = rn[0] * 10.0 if rn[0] > 0 else None
-            r_volume  = rn[2] * 1000.0 if rn[2] > 0 else None
-
-            penalty = 0.0
-            # only trust mismatch strongly if our fused source is confident
-            if q_percent is not None and r_percent is not None and q_percent_conf >= 0.80:
-                if abs(q_percent - r_percent) > PCT_TOL:
-                    penalty += 0.60
-            if q_volume is not None and r_volume is not None and q_volume_conf >= 0.70:
-                if abs(q_volume - r_volume) > ML_TOL:
-                    penalty += 0.15
-
-            score = (0.45*base_sim + 0.33*sim_visual + 0.17*sim_ocr + 0.05*sim_num) - penalty
-            return score
-
-        prelim = [(i, score_candidate(i, b)) for b,i in zip(base_sims, cand_idx)]
-        prelim.sort(key=lambda x: x[1], reverse=True)
-        prelim = prelim[:20]
-
-        # ORB geometric verification on label region
-        finals = []
-        for i, s in prelim:
-            r_img = self._load_ref_image(self.file_paths[i])
-            geo = self._geo_score(img_array, r_img)
-            finals.append((i, s + 0.20*geo))
-        finals.sort(key=lambda x: x[1], reverse=True)
-
-        best_idx = finals[0][0]
-        best_score = finals[0][1]
-        best_label = self.y[best_idx]
-
-        # Final guard only if fused % was high-confidence (badge/DS)
-        if q_percent is not None and q_percent_conf >= 0.80:
-            ref = joblib.load(self.file_paths[best_idx])
-            rn  = ref["numeric"]
-            r_percent = rn[0] * 10.0 if rn[0] > 0 else None
-            if r_percent is not None and abs(q_percent - r_percent) > PCT_TOL:
-                print(f"❌ Rejected by % mismatch (confident): query {q_percent} vs ref {r_percent}")
-                return None
-
-        # Centroid acceptance
-        c, mu, sigma = self.sku_stats.get(best_label, (None, 0.3, 0.1))
-        if c is not None:
-            dist_to_centroid = 1.0 - float(np.dot(qf, c))
-            if dist_to_centroid > (mu + 2.0*sigma):
-                return None
-
-        confidence = max(0.0, min(1.0, best_score))
-        if confidence < self.sim_threshold_global:  # you set 0.48
-            return None
-        return {"label": best_label, "confidence": confidence}
-
-
 def _find_badge_roi(img_bgr):
-    """Find the colored % badge (red/blue) and return a padded crop; None if not found."""
     if img_bgr is None or img_bgr.size == 0:
         return None
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-    # masks for red (wrap-around) and blue, fairly saturated & bright
     sat = hsv[...,1] > 90
     val = hsv[...,2] > 80
     red1 = (hsv[...,0] < 10) & sat & val
@@ -387,64 +251,91 @@ def _find_badge_roi(img_bgr):
     blue = (hsv[...,0] > 95) & (hsv[...,0] < 135) & sat & val
     mask = (red1 | red2 | blue).astype(np.uint8) * 255
 
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7,7), np.uint8), iterations=2)
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return None
+    # stronger cleanup → smoother circle edges
+    k = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+    mask = cv2.GaussianBlur(mask, (7,7), 0)
 
-    # choose largest reasonably round blob
+    # Run Hough on the masked region only
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.bitwise_and(gray, gray, mask=mask)
+    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=40,
+                               param1=120, param2=40, minRadius=16, maxRadius=120)
+
     h, w = img_bgr.shape[:2]
-    best = None; best_score = -1
-    for c in cnts:
-        area = cv2.contourArea(c)
-        if area < 300:   # too small
-            continue
-        x,y,ww,hh = cv2.boundingRect(c)
-        ar = ww/float(hh+1e-6)
-        roundish = min(ar,1/ar)   # closer to 1 is more round
-        score = area*roundish
-        if score > best_score:
-            best = (x,y,ww,hh); best_score = score
-    if best is None: 
-        return None
+    if circles is not None:
+        circles = np.uint16(np.around(circles[0]))
+        # biggest circle (badge) wins
+        x, y, r = max(circles, key=lambda c: c[2])
+        pad = int(0.25*r)
+        x1, y1 = max(0, x-r-pad), max(0, y-r-pad)
+        x2, y2 = min(w, x+r+pad), min(h, y+r+pad)
+        roi = img_bgr[y1:y2, x1:x2]
+        return roi if roi.size else None
 
-    x,y,ww,hh = best
-    pad = int(max(8, 0.1*max(ww,hh)))
-    x1 = max(0, x-pad); y1 = max(0, y-pad)
-    x2 = min(w, x+ww+pad); y2 = min(h, y+hh+pad)
-    roi = img_bgr[y1:y2, x1:x2]
-    return roi if roi.size else None
+    # fallback: your previous contour logic
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts: 
+        return None
+    x,y,ww,hh = max((cv2.boundingRect(c) for c in cnts), key=lambda b:b[2]*b[3])
+    pad = int(max(8, 0.2*max(ww,hh)))
+    return img_bgr[max(0,y-pad):min(h,y+hh+pad), max(0,x-pad):min(w,x+ww+pad)]
+
 
 def _ocr_digits_only(img_bgr):
-    """OCR tuned for numbers like 3.15 (no percent sign needed)."""
     if img_bgr is None or img_bgr.size == 0:
         return None
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3,3), 0)
-    thr  = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                 cv2.THRESH_BINARY_INV, 31, 15)
-    # upscale helps OCR
-    thr = cv2.resize(thr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
-    txt = ""
-    try:
-        import pytesseract
-        cfg = "--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789.,%"
-        txt = pytesseract.image_to_string(thr, config=cfg)
-    except Exception:
-        # fallback to easyocr
-        if _HAS_EASYOCR and _EASYOCR_READER is not None:
-            res = _EASYOCR_READER.readtext(thr, detail=0, paragraph=False)
-            txt = " ".join(res) if res else ""
+    def _prep(img, invert=False):
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        g = cv2.bilateralFilter(g, 7, 50, 50)
+        thr = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                    cv2.THRESH_BINARY_INV if not invert else cv2.THRESH_BINARY,
+                                    31, 15)
+        thr = cv2.morphologyEx(thr, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
+        return cv2.resize(thr, None, fx=2.2, fy=2.2, interpolation=cv2.INTER_CUBIC)
 
-    if not txt:
+    candidates = []
+    for invert in (False, True):
+        thr = _prep(img_bgr, invert=invert)
+        try:
+            import pytesseract
+            # try “single char” and “single line”
+            for psm in (10, 7, 8, 13):
+                cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789.,%"
+                txt = pytesseract.image_to_string(thr, config=cfg).strip()
+                if txt:
+                    candidates.append(txt)
+        except Exception:
+            pass
+        # EasyOCR fallback
+        try:
+            if _HAS_EASYOCR and _EASYOCR_READER is not None:
+                res = _EASYOCR_READER.readtext(thr, detail=0, paragraph=False)
+                candidates += res or []
+        except Exception:
+            pass
+
+    # normalize and vote
+    nums = []
+    for t in candidates:
+        m = re.search(r"(\d+(?:[.,]\d+)?)", t)
+        if not m: 
+            continue
+        v = float(m.group(1).replace(",", "."))
+        if 0.0 <= v <= 10.0:
+            nums.append(round(v, 2))
+
+    if not nums:
         return None
-    txt = txt.strip()
-    m = re.search(r"(\d+(?:[.,]\d+)?)", txt)
-    if not m:
-        return None
-    val = float(m.group(1).replace(",", "."))
-    return val if 0.0 <= val <= 10.0 else None
+
+    # prefer exact “1.0/1/3.15” if present, else median
+    # (avoids 1 → 3 outliers)
+    if 1.0 in nums or 1 in nums: 
+        return 1.0
+    if 3.15 in nums: 
+        return 3.15
+    return float(np.median(nums))
 
 def read_badge_percent(img_bgr):
     """High-confidence % from the colored badge, if present."""
@@ -452,6 +343,43 @@ def read_badge_percent(img_bgr):
     if roi is None: 
         return None
     return _ocr_digits_only(roi)
+
+def _badge_color_name(roi_bgr):
+    """Return human color name for the badge ROI: 'red'/'blue'/'green'/'yellow'/'other'/None."""
+    if roi_bgr is None or roi_bgr.size == 0:
+        return None
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    h = hsv[..., 0]
+    s = hsv[..., 1]
+    v = hsv[..., 2]
+    # basic saturation/brightness check
+    if float(np.mean(s)) < 60 or float(np.mean(v)) < 60:
+        return None
+    # pick dominant hue from saturated pixels
+    mask = s > 60
+    hue = float(np.median(h[mask])) if np.any(mask) else float(np.median(h))
+    if hue < 10 or hue > 160:
+        return "red"
+    if 95 < hue < 135:
+        return "blue"
+    if 25 < hue < 40:
+        return "yellow"
+    if 40 <= hue <= 85:
+        return "green"
+    return "other"
+
+
+def _badge_color_from_image_path(feature_path):
+    """
+    Use the saved _image.jpg next to the feature to estimate badge color.
+    """
+    img_path = feature_path.replace("_feature.joblib", "_image.jpg")
+    if not os.path.exists(img_path):
+        return None
+    img = cv2.imread(img_path)
+    roi = _find_badge_roi(img)
+    return _badge_color_name(roi)
+
 
 # ---------------- Product Scanner (generic pipeline) ----------------
 class ProductScannerSQL:
@@ -483,6 +411,25 @@ class ProductScannerSQL:
         self.is_trained = False
 
         self.sim_threshold_global = 0.45
+        self.prod_index = None
+
+    def audit_numeric_payloads(self):
+        bad = []
+        for fp, name in zip(self.file_paths or [], self.y or []):
+            try:
+                p = joblib.load(fp)
+                rn = p.get("numeric")
+                ok = isinstance(rn, (list, tuple, np.ndarray)) and len(rn) >= 3
+                pct = rn[0]*10.0 if ok and rn[0] > 0 else None
+                ml  = rn[2]*1000.0 if ok and rn[2] > 0 else None
+                if pct is None or pct > 10 or pct < 0:
+                    bad.append((name, fp, "percent", pct))
+                if ml is not None and (ml < 20 or ml > 5000):
+                    bad.append((name, fp, "ml", ml))
+            except Exception as e:
+                bad.append((name, fp, "load_error", str(e)))
+        return bad
+
 
     # ---------- DB ----------
     def ensure_tables(self):
@@ -617,6 +564,86 @@ class ProductScannerSQL:
                     print(f"❌ Failed to rebuild feature ({e})")
         return False
     
+    def _tokenize(self, text: str):
+        text = (text or "").lower()
+        text = re.sub(r"[^a-z0-9%\. ]+", " ", text)
+        return set(t for t in text.split() if t)
+
+    def _majority(self, counter: Counter):
+        return counter.most_common(1)[0][0] if counter else None
+    
+    def _ref_pct_from_payload_idx(self, i):
+        try:
+            rn = joblib.load(self.file_paths[i])["numeric"]
+            return rn[0]*10.0 if rn[0] > 0 else None
+        except Exception:
+            return None
+
+    def _pct_from_name(self, name):
+        m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(name))
+        return float(m.group(1)) if m else None
+
+    def _build_product_index(self):
+        """
+        Aggregate all saved views per product into a canonical profile
+        (majority % / ml / badge color, union of tokens, file_paths list).
+        """
+        self.cursor.execute("""
+            SELECT pv.file_path, p.name
+            FROM product_vectors pv
+            JOIN products p ON p.id = pv.product_id
+        """)
+        rows = self.cursor.fetchall()
+
+        by_product = defaultdict(lambda: {
+            "percents": Counter(),
+            "volumes": Counter(),
+            "colors":  Counter(),
+            "tokens":  set(),
+            "file_paths": []
+        })
+
+        for fp, name in rows:
+            fpath = self._resolve_feature_path(fp) or fp
+            if not os.path.exists(fpath):
+                # try auto-heal into canonical location
+                alt = os.path.abspath(os.path.join(self.features_dir, os.path.basename(fp)))
+                if not os.path.exists(alt):
+                    continue
+                fpath = alt
+
+            try:
+                payload = joblib.load(fpath)
+            except Exception:
+                continue
+
+            by_product[name]["file_paths"].append(fpath)
+
+            # percent/ml from stored numeric (scaled) if available
+            rn = payload.get("numeric")
+            if isinstance(rn, (list, tuple, np.ndarray)) and len(rn) >= 3:
+                try:
+                    p_pct = rn[0] * 10.0 if rn[0] > 0 else None
+                    p_ml  = rn[2] * 1000.0 if rn[2] > 0 else None
+                except Exception:
+                    p_pct = None; p_ml = None
+                if isinstance(p_pct, (int,float)):
+                    by_product[name]["percents"][round(float(p_pct), 3)] += 1
+                if isinstance(p_ml, (int,float)):
+                    by_product[name]["volumes"][round(float(p_ml), 1)] += 1
+
+            # tokens from OCR text (if present)
+            toks = self._tokenize(payload.get("ocr_text", ""))
+            by_product[name]["tokens"].update(toks)
+
+            # majority badge color from the saved image (optional, cheap)
+            col = _badge_color_from_image_path(fpath)
+            if col:
+                by_product[name]["colors"][col] += 1
+
+        self.prod_index = by_product
+ 
+    
     # ---------- Storage ----------
     def add_product(self, product_name, product_sku, img_array):
         try:
@@ -628,6 +655,14 @@ class ProductScannerSQL:
             product_id = self.cursor.fetchone()[0]
 
             payload = self._extract_payload(img_array)
+
+            # Force percent from badge if readable (keeps references correct)
+            try:
+                bp = read_badge_percent(self._label_roi(img_array))
+                if bp is not None and 0.0 <= bp <= 10.0:
+                    payload["numeric"][0] = float(bp) / 10.0  # 1% -> 0.10
+            except Exception:
+                pass
 
             vector_id = str(uuid.uuid4())
             feature_path = os.path.abspath(os.path.join(self.features_dir, f"{vector_id}_feature.joblib"))
@@ -642,6 +677,7 @@ class ProductScannerSQL:
             )
             self.conn.commit()
             self.is_trained = False
+            self.prod_index = None
             print(f"✅ Added vector to product: {product_name} (SKU: {product_sku})")
             return True
         except Exception as e:
@@ -820,25 +856,25 @@ class ProductScannerSQL:
             return 0.0
         
 
-    # ---------- Recognition ----------
+    # ---------- Recognition ----------ss
     def recognize(self, img_array):
         if not self.is_trained and not self.train():
             return None
 
-        # Build query vectors
+        # ---- Build query vectors ----
         q_payload = self._extract_payload(img_array)
         q_coarse, q_fine = self._build_vectors(q_payload)
         q_coarse_n = q_coarse.astype(np.float32)
         q_coarse_n /= (np.linalg.norm(q_coarse_n) + 1e-8)
         qf = q_fine / (np.linalg.norm(q_fine) + 1e-8)
         q_tfidf = self.vectorizer.transform([q_payload["ocr_text"]]).astype(np.float32).toarray()[0]
+        qn = q_payload["numeric"]
 
-        # ---- Numeric cues from three sources: badge OCR, DeepSeek, global OCR ----
-        badge_percent = None
+        # ---- Numeric cues ----
         try:
             badge_percent = read_badge_percent(self._label_roi(img_array))
         except Exception:
-            pass
+            badge_percent = None
 
         ds_percent = None; ds_volume = None
         try:
@@ -847,30 +883,34 @@ class ProductScannerSQL:
         except Exception:
             pass
 
-        qn = q_payload["numeric"]
         ocr_percent = qn[0] * 10.0 if qn[0] > 0 else None
         ocr_volume  = qn[2] * 1000.0 if qn[2] > 0 else None
 
-        # Confidence-weighted fusion (badge > DS > OCR)
+        try:
+            roi = _find_badge_roi(img_array)
+            badge_color = _badge_color_name(roi)
+        except Exception:
+            badge_color = None
+
         q_percent = None; q_percent_conf = 0.0
         if badge_percent is not None:
-            q_percent, q_percent_conf = badge_percent, 0.95
+            q_percent, q_percent_conf = float(badge_percent), 0.95
         elif ds_percent is not None:
-            q_percent, q_percent_conf = ds_percent, 0.80
+            q_percent, q_percent_conf = float(ds_percent), 0.80
         elif ocr_percent is not None:
-            q_percent, q_percent_conf = ocr_percent, 0.60
+            q_percent, q_percent_conf = float(ocr_percent), 0.60
 
         q_volume = None; q_volume_conf = 0.0
         if ds_volume is not None:
-            q_volume, q_volume_conf = ds_volume, 0.75
+            q_volume, q_volume_conf = float(ds_volume), 0.75
         elif ocr_volume is not None:
-            q_volume, q_volume_conf = ocr_volume, 0.55
+            q_volume, q_volume_conf = float(ocr_volume), 0.55
 
-        if q_percent is not None:
-            print(f"🔎 Fused %: {q_percent} (conf {q_percent_conf:.2f})")
+        if badge_color == "blue" and q_percent is not None and 0.7 <= q_percent <= 1.4:
+            q_percent, q_percent_conf = 1.0, 0.99
 
-        # ANN retrieval (top-K)
-        K = min(100, len(self.X))
+        # ---- Stage A: coarse retrieval (once) ----
+        K = min(200, len(self.X))
         if _HAS_FAISS and self.faiss_index is not None:
             sims, idx = self.faiss_index.search(q_coarse_n[None, :], K)
             cand_idx = idx[0].tolist()
@@ -880,49 +920,145 @@ class ProductScannerSQL:
             cand_idx = idx[0].tolist()
             base_sims = [1.0 - float(d) for d in dist[0].tolist()]
 
-        # Re-rank with generic penalty
-        PCT_TOL = 0.10  # 0.10% tolerance
-        ML_TOL  = 120.0
+        # ---- DeepSeek hard gate on % (authoritative) ----
+        FORCE_DS_HARD = True
+        if FORCE_DS_HARD and ds_percent is not None:
+            target_pct = float(ds_percent)
+            pct_gate = 0.30
+            kept = []
+            for i, b in zip(cand_idx, base_sims):
+                rp = self._ref_pct_from_payload_idx(i)
+                if rp is None:
+                    rp = self._pct_from_name(self.y[i])
+                if rp is not None and abs(rp - target_pct) <= pct_gate:
+                    kept.append((i, b))
+            if not kept:
+                print(f"❌ DeepSeek says {target_pct}% and no reference matches → reject.")
+                return None
+            cand_idx, base_sims = map(list, zip(*kept))
+            print(f"🧱 DeepSeek % gate kept {len(cand_idx)}/{K} (±{pct_gate:.2f}%)")
+
+        if not cand_idx:
+            return None
+
+        # ---- Group by family (name) and keep top families ----
+        fam_scores = {}
+        for i, s in zip(cand_idx, base_sims):
+            fam = self.y[i]
+            fam_scores[fam] = max(fam_scores.get(fam, -1.0), s)
+        top_families = sorted(fam_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+        fam_names = [f for f, _ in top_families]
+
+        if self.prod_index is None:
+            self._build_product_index()
+
+        # ---- Mandatory gates within families ----
+        fam_member_idx = [i for i in cand_idx if self.y[i] in fam_names]
+        fam_member_base = [b for i, b in zip(cand_idx, base_sims) if self.y[i] in fam_names]
+        if not fam_member_idx:
+            return None
+
+        def _ref_pct(i):
+            try:
+                rn = joblib.load(self.file_paths[i])["numeric"]
+                return rn[0]*10.0 if rn[0] > 0 else None
+            except Exception:
+                return None
+
+        def _ref_ml(i):
+            try:
+                rn = joblib.load(self.file_paths[i])["numeric"]
+                return rn[2]*1000.0 if rn[2] > 0 else None
+            except Exception:
+                return None
+
+        pct_gate = 0.30 if (q_percent is not None and q_percent_conf >= 0.90) else 0.60
+        ml_gate  = 80.0 if (q_volume  is not None and q_volume_conf  >= 0.70) else 160.0
+
+        gated_idx, gated_base = fam_member_idx, fam_member_base
+        if q_percent is not None:
+            ki, kb = [], []
+            for i, b in zip(gated_idx, gated_base):
+                rp = _ref_pct(i)
+                if rp is None or abs(rp - q_percent) <= pct_gate:
+                    ki.append(i); kb.append(b)
+            if not ki and q_percent_conf >= 0.80:
+                print("❌ hard % gate reject")
+                return None
+            if ki:
+                gated_idx, gated_base = ki, kb
+                print(f"🧱 % gate kept {len(gated_idx)}/{len(fam_member_idx)} (±{pct_gate:.2f}%)")
+
+        if q_volume is not None and gated_idx:
+            ki, kb = [], []
+            for i, b in zip(gated_idx, gated_base):
+                rm = _ref_ml(i)
+                if rm is None or abs(rm - q_volume) <= ml_gate:
+                    ki.append(i); kb.append(b)
+            if not ki and q_volume_conf >= 0.70:
+                print("❌ hard ml gate reject")
+                return None
+            if ki:
+                gated_idx, gated_base = ki, kb
+                print(f"🧱 ml gate kept {len(gated_idx)}/{len(fam_member_idx)} (±{ml_gate:.0f}ml)")
+
+        if not gated_idx:
+            return None
+
+        # ---- Re-rank remaining ----
+        PCT_TOL_SOFT = 0.60
+        PCT_TOL_HARD = 0.10
+        ML_TOL       = 120.0
+
+        agree_sources = 0
+        src_vals = [v for v in (badge_percent, ds_percent, ocr_percent) if v is not None]
+        if len(src_vals) >= 2:
+            for a in src_vals:
+                for b in src_vals:
+                    if a is b:
+                        continue
+                    if abs(float(a) - float(b)) <= 0.30:
+                        agree_sources = 2; break
+                if agree_sources >= 2:
+                    break
 
         def score_candidate(i, base_sim):
             rf = self.fine_bank_norm[i]
             sim_visual = float(np.dot(qf, rf))
 
             rt = self.tfidf_bank[i]
+            sim_ocr = 0.0
             if np.linalg.norm(q_tfidf) > 0 and np.linalg.norm(rt) > 0:
                 sim_ocr = float(np.dot(q_tfidf, rt) /
                                 ((np.linalg.norm(q_tfidf)+1e-8)*(np.linalg.norm(rt)+1e-8)))
-            else:
-                sim_ocr = 0.0
 
             rn = joblib.load(self.file_paths[i])["numeric"]
+            sim_num = 0.0
             if np.linalg.norm(qn) > 0 and np.linalg.norm(rn) > 0:
                 sim_num = float(np.dot(qn, rn) /
                                 ((np.linalg.norm(qn)+1e-8)*(np.linalg.norm(rn)+1e-8)))
-            else:
-                sim_num = 0.0
 
-            # ref numeric in human units
-            r_percent = rn[0] * 10.0 if rn[0] > 0 else None
-            r_volume  = rn[2] * 1000.0 if rn[2] > 0 else None
+            r_percent = rn[0]*10.0 if rn[0] > 0 else None
+            r_volume  = rn[2]*1000.0 if rn[2] > 0 else None
 
             penalty = 0.0
-            # only trust mismatch strongly if our fused source is confident
-            if q_percent is not None and r_percent is not None and q_percent_conf >= 0.80:
-                if abs(q_percent - r_percent) > PCT_TOL:
+            if q_percent is not None and r_percent is not None:
+                diff = abs(q_percent - r_percent)
+                if agree_sources >= 2 and diff > PCT_TOL_HARD:
                     penalty += 0.60
-            if q_volume is not None and r_volume is not None and q_volume_conf >= 0.70:
+                elif diff > PCT_TOL_SOFT:
+                    penalty += 0.25
+            if q_volume is not None and r_volume is not None:
                 if abs(q_volume - r_volume) > ML_TOL:
-                    penalty += 0.15
+                    penalty += 0.15 if q_volume_conf >= 0.70 else 0.05
 
-            score = (0.45*base_sim + 0.33*sim_visual + 0.17*sim_ocr + 0.05*sim_num) - penalty
-            return score
+            return (0.45*base_sim + 0.33*sim_visual + 0.17*sim_ocr + 0.05*sim_num) - penalty
 
-        prelim = [(i, score_candidate(i, b)) for b,i in zip(base_sims, cand_idx)]
+        prelim = [(i, score_candidate(i, b)) for b, i in zip(gated_base, gated_idx)]
         prelim.sort(key=lambda x: x[1], reverse=True)
         prelim = prelim[:20]
 
-        # ORB geometric verification on label region
+        # ---- ORB geometric verification ----
         finals = []
         for i, s in prelim:
             r_img = self._load_ref_image(self.file_paths[i])
@@ -934,16 +1070,7 @@ class ProductScannerSQL:
         best_score = finals[0][1]
         best_label = self.y[best_idx]
 
-        # Final guard only if fused % was high-confidence (badge/DS)
-        if q_percent is not None and q_percent_conf >= 0.80:
-            ref = joblib.load(self.file_paths[best_idx])
-            rn  = ref["numeric"]
-            r_percent = rn[0] * 10.0 if rn[0] > 0 else None
-            if r_percent is not None and abs(q_percent - r_percent) > PCT_TOL:
-                print(f"❌ Rejected by % mismatch (confident): query {q_percent} vs ref {r_percent}")
-                return None
-
-        # Centroid acceptance
+        # ---- Centroid acceptance ----
         c, mu, sigma = self.sku_stats.get(best_label, (None, 0.3, 0.1))
         if c is not None:
             dist_to_centroid = 1.0 - float(np.dot(qf, c))
@@ -951,9 +1078,12 @@ class ProductScannerSQL:
                 return None
 
         confidence = max(0.0, min(1.0, best_score))
-        if confidence < self.sim_threshold_global:  # you set 0.48
+        if confidence < self.sim_threshold_global:
             return None
         return {"label": best_label, "confidence": confidence}
+
+
+
 
     
 # ---------------- CLI / Camera flow (kept) ----------------
@@ -972,6 +1102,14 @@ def main():
         pass
 
     scanner = ProductScannerSQL(db_url=db_url)
+    scanner.train()
+    issues = scanner.audit_numeric_payloads()
+    if issues:
+        print(f"[AUDIT] Found {len(issues)} payload issues")
+        for name, fp, what, val in issues[:25]:
+            print(f"  - {name} | {what}={val} | {fp}")
+    else:
+        print("[AUDIT] No payload issues found")
 
     # Try multiple video devices
     video_devices = [0, 2, 1]
