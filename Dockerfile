@@ -84,8 +84,18 @@ RUN pip install --no-cache-dir \
     yarl==1.8.2 \
     zipp==1.0.0
 
-# Install uvicorn explicitly
-RUN pip install --no-cache-dir uvicorn
+# Install the essential packages: numpy, opencv, fastapi, uvicorn
+RUN pip install --no-cache-dir \
+    numpy==1.24.3 \
+    opencv-python-headless==4.8.1.78 \
+    fastapi==0.104.1 \
+    uvicorn==0.22.0
+
+# Verify that FastAPI and Uvicorn are installed
+RUN python -c "import fastapi; print('FastAPI version:', fastapi.__version__)" && \
+    python -c "import uvicorn; print('Uvicorn version:', uvicorn.__version__)" && \
+    python -c "import numpy; print('NumPy version:', numpy.__version__)" && \
+    python -c "import cv2; print('OpenCV version:', cv2.__version__)"
 
 # App files
 COPY . .
