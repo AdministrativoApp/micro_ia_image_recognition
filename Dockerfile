@@ -84,6 +84,9 @@ RUN pip install --no-cache-dir \
     yarl==1.8.2 \
     zipp==1.0.0
 
+# Install uvicorn explicitly
+RUN pip install --no-cache-dir uvicorn
+
 # App files
 COPY . .
 RUN mkdir -p features
