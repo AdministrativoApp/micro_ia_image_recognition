@@ -3,21 +3,17 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies needed for OpenCV and image processing
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends apt-utils && \
-    apt-get install -y --no-install-recommends \
+RUN echo "deb http://deb.debian.org/debian bullseye main contrib non-free" > /etc/apt/sources.list && \
+    apt-get update -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
-    && apt-get install -y --no-install-recommends \
     ffmpeg \
-    && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
-    && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
-    && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
-    && apt-get install -y --no-install-recommends \
     libgtk-3-0 \
+    pkg-config \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
