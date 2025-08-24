@@ -1,39 +1,28 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install system dependencies and build tools for mediapipe, opencv, tensorflow
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    pkg-config \
-    ffmpeg \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libgomp1 \
-    libgthread-2.0-0 \
-    libgtk-3-0 \
-    libavcodec-dev \
-    libavformat-dev \
-    libswscale-dev \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# System deps — only runtime libs (no *-dev needed for pip wheels)
+RUN apt-get update -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsm6 \
+        libxext6 \
+        libgl1 \
+        libglib2.0-0 \
+        libgtk-3-0 \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install
+# If you use OpenCV, prefer the headless wheel in servers/containers
+# (no GUI backends; avoids extra deps). In requirements.txt, use:
+# opencv-python-headless>=4.9,<5
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# Copy the project files
 COPY . .
-
-# Create required folder
 RUN mkdir -p features
 
-# Set environment
 ENV PYTHONUNBUFFERED=1
-
 EXPOSE 8000
-
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
