@@ -1,20 +1,25 @@
-FROM python:3.11-bullseye
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies needed for OpenCV and image processing
-RUN echo "-- apt sources:" && cat /etc/apt/sources.list || true && \
-    apt-get update -y && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential \
-        ffmpeg \
-        libsm6 \
-        libxext6 \
-        libgl1-mesa-glx \
-        libglib2.0-0 \
-        libgtk-3-0 \
-        pkg-config && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+# Install system dependencies and build tools for mediapipe, opencv, tensorflow
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    pkg-config \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libgomp1 \
+    libgthread-2.0-0 \
+    libgtk-3-0 \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install
 COPY requirements.txt .
