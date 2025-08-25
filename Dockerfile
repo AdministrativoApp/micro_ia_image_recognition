@@ -27,13 +27,22 @@ RUN tail -n +21 requirements.txt | head -20 > requirements-part2.txt && \
 RUN tail -n +41 requirements.txt > requirements-part3.txt && \
     pip install --no-cache-dir -r requirements-part3.txt
 
-# Verify core packages
+# Install core packages including joblib
 RUN pip install --no-cache-dir \
     numpy==1.24.3 \
     opencv-python-headless==4.8.1.78 \
     fastapi==0.104.1 \
     uvicorn==0.22.0 \
-    Pillow==10.0.1
+    Pillow==10.0.1 \
+    joblib==1.3.2
+
+# Verify ALL critical packages including joblib
+RUN python -c "import fastapi; print('FastAPI OK')" && \
+    python -c "import uvicorn; print('Uvicorn OK')" && \
+    python -c "import numpy; print('NumPy OK')" && \
+    python -c "import cv2; print('OpenCV OK')" && \
+    python -c "import PIL; print('Pillow OK')" && \
+    python -c "import joblib; print('Joblib OK')"
 
 COPY . .
 RUN mkdir -p features
