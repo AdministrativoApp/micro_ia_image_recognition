@@ -27,7 +27,7 @@ RUN tail -n +21 requirements.txt | head -20 > requirements-part2.txt && \
 RUN tail -n +41 requirements.txt > requirements-part3.txt && \
     pip install --no-cache-dir -r requirements-part3.txt
 
-# Install core packages including joblib and psycopg2
+# Install core packages including all ML dependencies
 RUN pip install --no-cache-dir \
     numpy==1.24.3 \
     opencv-python-headless==4.8.1.78 \
@@ -35,16 +35,27 @@ RUN pip install --no-cache-dir \
     uvicorn==0.22.0 \
     Pillow==10.0.1 \
     joblib==1.3.2 \
-    psycopg2-binary==2.9.7
+    psycopg2-binary==2.9.7 \
+    scikit-learn==1.3.2 \
+    tensorflow==2.13.0 \
+    mediapipe==0.10.0 \
+    python-dotenv==1.0.0
 
 # Verify ALL critical packages
-RUN python -c "import fastapi; print('FastAPI OK')" && \
-    python -c "import uvicorn; print('Uvicorn OK')" && \
-    python -c "import numpy; print('NumPy OK')" && \
-    python -c "import cv2; print('OpenCV OK')" && \
-    python -c "import PIL; print('Pillow OK')" && \
-    python -c "import joblib; print('Joblib OK')" && \
-    python -c "import psycopg2; print('Psycopg2 OK')"
+RUN python -c "\
+import fastapi; print('FastAPI OK'); \
+import uvicorn; print('Uvicorn OK'); \
+import numpy; print('NumPy OK'); \
+import cv2; print('OpenCV OK'); \
+import PIL; print('Pillow OK'); \
+import joblib; print('Joblib OK'); \
+import psycopg2; print('Psycopg2 OK'); \
+import sklearn; print('Scikit-learn OK'); \
+import tensorflow; print('TensorFlow OK'); \
+import mediapipe; print('MediaPipe OK'); \
+from dotenv import load_dotenv; print('python-dotenv OK'); \
+print('All imports successful!')\
+"
 
 COPY . .
 RUN mkdir -p features
