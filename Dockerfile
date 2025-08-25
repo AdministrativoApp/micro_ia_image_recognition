@@ -14,12 +14,12 @@ RUN apt-get update -y && \
         python3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy clean requirements
+# Copy requirements
 COPY requirements.txt .
 
 # Install Python packages
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements-clean.txt
+    pip install --no-cache-dir -r requirements.txt
 
 # Verify installations
 RUN python -c "import fastapi; print('FastAPI OK')" && \
