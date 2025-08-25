@@ -15,7 +15,7 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy clean requirements
-COPY requirements-clean.txt .
+COPY requirements.txt .
 
 # Install Python packages
 RUN pip install --upgrade pip && \
