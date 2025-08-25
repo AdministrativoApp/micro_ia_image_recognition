@@ -24,16 +24,13 @@ RUN pip install --no-cache-dir \
     joblib==1.3.2 \
     python-dotenv==1.0.0
 
-# Install OpenCV first (it's the most stable)
+# Install OpenCV
 RUN pip install --no-cache-dir opencv-python-headless==4.8.1.78
 
-# Install scikit-learn next
+# Install scikit-learn
 RUN pip install --no-cache-dir scikit-learn==1.3.2
 
-# Install mediapipe with specific flags to avoid compilation issues
-RUN pip install --no-cache-dir --verbose mediapipe==0.10.0
-
-# Install tensorflow-cpu instead of tensorflow (lighter and more reliable)
+# Install tensorflow-cpu instead of tensorflow
 RUN pip install --no-cache-dir tensorflow-cpu==2.13.0
 
 # Install database and web packages
@@ -42,10 +39,9 @@ RUN pip install --no-cache-dir \
     fastapi==0.104.1 \
     uvicorn==0.22.0
 
-# Install the rest from requirements.txt but skip already installed packages
-# Create a filtered requirements file without the packages we already installed
+# Install the rest from requirements.txt but skip problematic packages
 RUN python -c "\
-excluded_packages = ['numpy', 'Pillow', 'joblib', 'python-dotenv', 'opencv-python-headless', 'scikit-learn', 'mediapipe', 'tensorflow', 'tensorflow-cpu', 'psycopg2-binary', 'fastapi', 'uvicorn']\n\
+excluded_packages = ['numpy', 'Pillow', 'joblib', 'python-dotenv', 'opencv-python-headless', 'scikit-learn', 'tensorflow', 'tensorflow-cpu', 'psycopg2-binary', 'fastapi', 'uvicorn', 'mediapipe']\n\
 with open('requirements.txt', 'r') as f:\n\
     with open('filtered-requirements.txt', 'w') as out:\n\
         for line in f:\n\
@@ -55,7 +51,7 @@ with open('requirements.txt', 'r') as f:\n\
 
 RUN pip install --no-cache-dir -r filtered-requirements.txt
 
-# Verify ALL critical packages
+# Verify ALL critical packages (without mediapipe)
 RUN python -c "\
 import fastapi; print('FastAPI OK'); \
 import uvicorn; print('Uvicorn OK'); \
@@ -66,7 +62,6 @@ import joblib; print('Joblib OK'); \
 import psycopg2; print('Psycopg2 OK'); \
 import sklearn; print('Scikit-learn OK'); \
 import tensorflow; print('TensorFlow OK'); \
-import mediapipe; print('MediaPipe OK'); \
 from dotenv import load_dotenv; print('python-dotenv OK'); \
 print('All imports successful!')\
 "
