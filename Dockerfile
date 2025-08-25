@@ -39,16 +39,10 @@ RUN pip install --no-cache-dir \
     fastapi==0.104.1 \
     uvicorn==0.22.0
 
-# Install the rest from requirements.txt but skip problematic packages
-RUN python -c "\
-excluded_packages = ['numpy', 'Pillow', 'joblib', 'python-dotenv', 'opencv-python-headless', 'scikit-learn', 'tensorflow', 'tensorflow-cpu', 'psycopg2-binary', 'fastapi', 'uvicorn', 'mediapipe']\n\
-with open('requirements.txt', 'r') as f:\n\
-    with open('filtered-requirements.txt', 'w') as out:\n\
-        for line in f:\n\
-            if not any(pkg in line for pkg in excluded_packages):\n\
-                out.write(line)\n\
-"
+# Create a simple filtered requirements file using grep
+RUN grep -v -E "(numpy|Pillow|joblib|python-dotenv|opencv-python-headless|scikit-learn|tensorflow|psycopg2-binary|fastapi|uvicorn|mediapipe)" requirements.txt > filtered-requirements.txt
 
+# Install the remaining packages
 RUN pip install --no-cache-dir -r filtered-requirements.txt
 
 # Verify ALL critical packages (without mediapipe)
