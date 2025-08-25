@@ -27,4 +27,5 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64   # 👈 force amd64 so mediapipe wheels exist
           tags: ${{ secrets.DOCKER_USERNAME }}/micro_ia_image_recognition:latest
