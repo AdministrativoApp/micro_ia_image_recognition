@@ -1,33 +1,32 @@
 FROM python:3.11-slim-bookworm
 WORKDIR /app
 
-# Only essential system dependencies for web/imaging
+# System dependencies
 RUN apt-get update -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # For OpenCV/image processing
         ffmpeg \
         libsm6 \
         libxext6 \
         libgl1 \
-        
-        # Development/build tools
         git \
         pkg-config \
         gcc \
         python3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Clean requirements.txt - remove all desktop/GUI packages
-COPY requirements.txt .
+# Copy clean requirements
+COPY requirements-clean.txt .
 
+# Install Python packages
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements-clean.txt
 
-# Verify critical web packages
-RUN python -c "import fastapi; print('FastAPI version:', fastapi.__version__)" && \
-    python -c "import uvicorn; print('Uvicorn version:', uvicorn.__version__)" && \
-    python -c "import numpy; print('NumPy version:', numpy.__version__)" && \
-    python -c "import cv2; print('OpenCV version:', cv2.__version__)"
+# Verify installations
+RUN python -c "import fastapi; print('FastAPI OK')" && \
+    python -c "import uvicorn; print('Uvicorn OK')" && \
+    python -c "import numpy; print('NumPy OK')" && \
+    python -c "import cv2; print('OpenCV OK')" && \
+    python -c "import PIL; print('Pillow OK')"
 
 # App files
 COPY . .
