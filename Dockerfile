@@ -6,6 +6,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1
 
+# Fail fast if not amd64 (MediaPipe 0.10.0 wheel requires x86_64)
+RUN uname -m | grep -qE 'x86_64|amd64' || (echo "ERROR: Build must target linux/amd64. In GitHub Actions, set platforms: linux/amd64"; exit 1)
+
 # -------- System deps needed by OpenCV/MediaPipe/TensorFlow --------
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
