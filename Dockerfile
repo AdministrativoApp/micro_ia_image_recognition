@@ -1,6 +1,7 @@
 FROM python:3.11-slim-bookworm
 WORKDIR /app
 
+# Install ALL required system dependencies for scientific packages
 RUN apt-get update -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -10,7 +11,21 @@ RUN apt-get update -y && \
         git \
         pkg-config \
         gcc \
-        python3-dev && \
+        g++ \
+        python3-dev \
+        libopenblas-dev \
+        liblapack-dev \
+        libatlas-base-dev \
+        libjpeg-dev \
+        libpng-dev \
+        libtiff-dev \
+        libavcodec-dev \
+        libavformat-dev \
+        libswscale-dev \
+        libv4l-dev \
+        libxvidcore-dev \
+        libx264-dev \
+        && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade pip
@@ -19,12 +34,16 @@ RUN pip install --upgrade pip
 RUN pip install --no-cache-dir numpy==1.24.3 && \
     python -c "import numpy; print('NumPy OK - version:', numpy.__version__)"
 
+RUN pip install --no-cache-dir scipy==1.11.3 && \
+    python -c "import scipy; print('SciPy OK - version:', scipy.__version__)"
+
 RUN pip install --no-cache-dir Pillow==10.0.1 && \
     python -c "import PIL; print('Pillow OK - version:', PIL.__version__)"
 
 RUN pip install --no-cache-dir opencv-python-headless==4.8.1.78 && \
     python -c "import cv2; print('OpenCV OK - version:', cv2.__version__)"
 
+# Install scikit-learn with build dependencies
 RUN pip install --no-cache-dir scikit-learn==1.3.2 && \
     python -c "import sklearn; print('Scikit-learn OK - version:', sklearn.__version__)"
 
