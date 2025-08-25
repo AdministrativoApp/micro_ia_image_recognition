@@ -65,7 +65,7 @@ RUN pip install --no-cache-dir uvicorn==0.22.0 && \
 RUN pip install --no-cache-dir python-dotenv==1.0.0 && \
     python -c "from dotenv import load_dotenv; print('python-dotenv OK')"
 
-# Now install the rest of the packages
+# Install remaining packages in small groups
 RUN pip install --no-cache-dir \
     aiohttp==3.8.4 \
     aiosignal==1.3.1 \
@@ -74,30 +74,40 @@ RUN pip install --no-cache-dir \
     attrs==22.2.0 \
     Babel==2.10.3 \
     bcrypt==3.2.2 \
-    certifi==2022.9.24 \
+    certifi==2022.9.24
+
+RUN pip install --no-cache-dir \
     chardet==5.1.0 \
     charset-normalizer==3.0.1 \
     cryptography==38.0.4 \
     defusedxml==0.7.1 \
     Django==3.2.19 \
-    frozenlist==1.3.3 \
+    frozenlist==1.3.3
+
+RUN pip install --no-cache-dir \
     html5lib==1.1 \
     httplib2==0.20.4 \
     idna==3.3 \
     importlib-metadata==4.12.0 \
     Jinja2==3.1.2 \
-    markdown-it-py==2.1.0 \
+    markdown-it-py==2.1.0
+
+RUN pip install --no-cache-dir \
     MarkupSafe==2.1.2 \
     mdurl==0.1.2 \
     more-itertools==8.10.0 \
     multidict==6.0.4 \
     oauthlib==3.2.2 \
-    packaging==23.0 \
+    packaging==23.0
+
+RUN pip install --no-cache-dir \
     pyparsing==3.0.9 \
     PySocks==1.7.1 \
     PyYAML==6.0 \
     requests==2.28.1 \
-    requests-toolbelt==0.10.1 \
+    requests-toolbelt==0.10.1
+
+RUN pip install --no-cache-dir \
     rich==13.3.1 \
     six==1.16.0 \
     sqlparse==0.4.2 \
