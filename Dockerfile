@@ -50,6 +50,10 @@ RUN pip install --no-cache-dir scikit-learn==1.3.2 && \
 RUN pip install --no-cache-dir joblib==1.3.2 && \
     python -c "import joblib; print('Joblib OK - version:', joblib.__version__)"
 
+# Install mediapipe (add this line)
+RUN pip install --no-cache-dir mediapipe==0.10.0 && \
+    python -c "import mediapipe; print('MediaPipe OK - version:', mediapipe.__version__)"
+
 RUN pip install --no-cache-dir tensorflow-cpu==2.13.0 && \
     python -c "import tensorflow; print('TensorFlow OK - version:', tensorflow.__version__)"
 
