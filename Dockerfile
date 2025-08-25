@@ -24,30 +24,36 @@ RUN pip install --no-cache-dir \
     joblib==1.3.2 \
     python-dotenv==1.0.0
 
-# Then install computer vision packages
-RUN pip install --no-cache-dir \
-    opencv-python-headless==4.8.1.78 \
-    scikit-learn==1.3.2 \
-    mediapipe==0.10.0
+# Install OpenCV first (it's the most stable)
+RUN pip install --no-cache-dir opencv-python-headless==4.8.1.78
 
-# Then install tensorflow (can be problematic)
-RUN pip install --no-cache-dir tensorflow==2.13.0
+# Install scikit-learn next
+RUN pip install --no-cache-dir scikit-learn==1.3.2
 
-# Then install database and web packages
+# Install mediapipe with specific flags to avoid compilation issues
+RUN pip install --no-cache-dir --verbose mediapipe==0.10.0
+
+# Install tensorflow-cpu instead of tensorflow (lighter and more reliable)
+RUN pip install --no-cache-dir tensorflow-cpu==2.13.0
+
+# Install database and web packages
 RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.7 \
     fastapi==0.104.1 \
     uvicorn==0.22.0
 
-# Finally install the rest from requirements.txt in batches
-RUN head -20 requirements.txt > requirements-part1.txt && \
-    pip install --no-cache-dir -r requirements-part1.txt
+# Install the rest from requirements.txt but skip already installed packages
+# Create a filtered requirements file without the packages we already installed
+RUN python -c "\
+excluded_packages = ['numpy', 'Pillow', 'joblib', 'python-dotenv', 'opencv-python-headless', 'scikit-learn', 'mediapipe', 'tensorflow', 'tensorflow-cpu', 'psycopg2-binary', 'fastapi', 'uvicorn']\n\
+with open('requirements.txt', 'r') as f:\n\
+    with open('filtered-requirements.txt', 'w') as out:\n\
+        for line in f:\n\
+            if not any(pkg in line for pkg in excluded_packages):\n\
+                out.write(line)\n\
+"
 
-RUN tail -n +21 requirements.txt | head -20 > requirements-part2.txt && \
-    pip install --no-cache-dir -r requirements-part2.txt
-
-RUN tail -n +41 requirements.txt > requirements-part3.txt && \
-    pip install --no-cache-dir -r requirements-part3.txt
+RUN pip install --no-cache-dir -r filtered-requirements.txt
 
 # Verify ALL critical packages
 RUN python -c "\
