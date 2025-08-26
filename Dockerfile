@@ -1,15 +1,16 @@
-# -------- Base --------
+# -------- Base: Python 3.11 on Debian 12 (Bookworm) --------
 FROM python:3.11-slim-bookworm
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=120
 
-# Fail fast if not amd64 (MediaPipe 0.10.0 wheel requires x86_64)
-RUN uname -m | grep -qE 'x86_64|amd64' || (echo "ERROR: Build must target linux/amd64. In GitHub Actions, set platforms: linux/amd64"; exit 1)
+# Fail fast if not amd64 (MediaPipe 0.10.0 Python wheels target x86_64)
+RUN uname -m | grep -qE 'x86_64|amd64' || (echo "ERROR: Build must target linux/amd64. Set platforms: linux/amd64 in buildx."; exit 1)
 
-# -------- System deps needed by OpenCV/MediaPipe/TensorFlow --------
+# -------- System deps required by OpenCV/MediaPipe/TensorFlow --------
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -24,29 +25,30 @@ RUN apt-get update -y && \
         python3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# (Optional) Show arch & Python early in build logs
+# (Optional) Log arch & Python early
 RUN python - <<'PY'
 import platform, sys
 print("ARCH:", platform.machine(), "PY:", sys.version)
 PY
 
-# -------- Python packaging tools --------
+# -------- Packaging tools --------
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# -------- Core pins compatible across TF 2.13 + MP 0.10.0 --------
-# numpy first helps manylinux wheel resolution; protobuf pinned for TF/MP; absl<2 required by TF 2.13
+# -------- Core pins that play nicely with TF 2.13 --------
+# numpy first helps manylinux wheel resolution; protobuf range works with TF & MP; absl<2 for TF 2.13
 RUN pip install \
     "numpy==1.24.3" \
     "protobuf>=3.20.3,<5" \
     "absl-py==1.4.0"
 
-# -------- TensorFlow FIRST (locks absl<2) --------
+# -------- Install TensorFlow FIRST (locks absl<2 etc.) --------
 RUN pip install "tensorflow-cpu==2.13.0" && \
     python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
 
-# -------- MediaPipe (wheel only) --------
-# DO NOT install a separate opencv-python; let mediapipe pull a compatible one
-RUN pip install --only-binary=:all: "mediapipe==0.10.0" && \
+# -------- Install MediaPipe (wheel only) --------
+# Let MediaPipe pull a compatible OpenCV internally; don't install opencv yourself.
+# Use -vv temporarily to get clear diagnostics in CI logs if it can't find a wheel.
+RUN pip install -vv --only-binary=:all: "mediapipe==0.10.0" && \
     python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)"
 
 # -------- Your main Python stack --------
@@ -77,7 +79,7 @@ print("uvicorn", uvicorn.__version__)
 print("python-dotenv OK")
 PY
 
-# -------- Extra libs you listed (keep only what you truly need) --------
+# -------- Extra libs you listed (trim if unused) --------
 RUN pip install \
     aiohttp==3.8.4 \
     aiosignal==1.3.1 \
@@ -128,4 +130,4 @@ RUN mkdir -p features
 
 # -------- Runtime --------
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port",  "8000"]
