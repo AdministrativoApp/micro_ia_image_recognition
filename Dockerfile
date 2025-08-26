@@ -6,13 +6,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DEFAULT_TIMEOUT=180
 
-# Fail fast if not amd64 (needed for prebuilt MP wheels)
+# Fail fast if not amd64 (needed for MediaPipe wheels)
 RUN uname -m | grep -qE 'x86_64|amd64' || (echo "ERROR: Build must target linux/amd64"; exit 1)
 
-# Minimal system deps for TF/MP/OpenCV
+# System deps for TF/MP/OpenCV + headers for cffi/cryptography
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     ffmpeg libsm6 libxext6 libgl1 libglib2.0-0 \
     git pkg-config gcc g++ python3-dev \
+    libffi-dev libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # (Optional) print arch/Python for logs
@@ -31,7 +32,7 @@ RUN pip install "numpy==1.24.3" "protobuf>=3.20.3,<5"
 RUN pip install "tensorflow-cpu==2.15.0.post1" && \
     python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
 
-# MediaPipe (use a tag that has Linux cp310 manylinux_2_28 wheel)
+# MediaPipe (Linux cp310 manylinux wheel)
 # Do NOT install opencv separately; let MP resolve it
 RUN pip install --only-binary=:all: "mediapipe==0.10.21" -vv && \
     python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)"
@@ -59,8 +60,8 @@ print("python-dotenv OK")
 PY
 
 # --- Robust install for the "extras" batch ---
-# 1) Try wheels-only first (fast, tiny images)
-# 2) If any package lacks a wheel, install Rust & retry just that package
+# 1) Try wheels-only first (fast/tiny)
+# 2) If any package lacks a wheel, install Rust & retry with sources allowed (verbose)
 RUN set -eux; \
   PKGS="\
     aiohttp==3.8.4 aiosignal==1.3.1 asgiref==3.6.0 async-timeout==4.0.2 attrs==22.2.0 \
@@ -73,15 +74,11 @@ RUN set -eux; \
     PyYAML==6.0 requests==2.28.1 requests-toolbelt==0.10.1 rich==13.3.1 \
     six==1.16.0 sqlparse==0.4.2 urllib3==1.26.12 webencodings==0.5.1 yarl==1.8.2 zipp==1.0.0 \
   "; \
-  # First attempt: wheels only
   if ! pip install --only-binary=:all: --prefer-binary $PKGS; then \
-    echo ">>> Some packages had no wheels. Installing Rust toolchain and retrying the batch with source builds allowed…"; \
+    echo '>>> Some packages had no wheels. Installing Rust & retrying with sources allowed…'; \
     apt-get update -y && apt-get install -y --no-install-recommends rustc cargo && rm -rf /var/lib/apt/lists/*; \
-    pip install --prefer-binary $PKGS; \
+    pip install -vv --prefer-binary $PKGS; \
   fi
-
-# (notice: removed importlib-metadata==4.12.0; bumped cryptography to 41.0.7; added --prefer-binary)
-
 
 # App
 COPY . .
