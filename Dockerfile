@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DEFAULT_TIMEOUT=180
 
-# Fail fast if not amd64 (needed for MediaPipe wheels)
+# Fail fast if not amd64 (needed for MP wheels)
 RUN uname -m | grep -qE 'x86_64|amd64' || (echo "ERROR: Build must target linux/amd64"; exit 1)
 
 # System deps for TF/MP/OpenCV + headers for cffi/cryptography
@@ -16,28 +16,28 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     libffi-dev libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# (Optional) print arch/Python for logs
+# (Optional) print arch/Python
 RUN python - <<'PY'
 import platform, sys
 print("ARCH:", platform.machine(), "PY:", sys.version)
 PY
 
-# Packaging tools
+# Tooling
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Core pins (play nice with TF/MP)
+# Core compatible pins
 RUN pip install "numpy==1.24.3" "protobuf>=3.20.3,<5"
 
-# TensorFlow first (2.15 pairs well with newer MP)
+# TensorFlow first
 RUN pip install "tensorflow-cpu==2.15.0.post1" && \
     python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
 
-# MediaPipe (Linux cp310 manylinux wheel)
-# Do NOT install opencv separately; let MP resolve it
+# MediaPipe (cp310 wheel)
+# Let MP pull its own compatible OpenCV
 RUN pip install --only-binary=:all: "mediapipe==0.10.21" -vv && \
     python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)"
 
-# Your main Python stack
+# Main Python stack
 RUN pip install \
     scipy==1.11.3 Pillow==10.0.1 scikit-learn==1.3.2 joblib==1.3.2 && \
     python - <<'PY'
@@ -59,9 +59,9 @@ print("uvicorn", uvicorn.__version__)
 print("python-dotenv OK")
 PY
 
-# --- Robust install for the "extras" batch ---
-# 1) Try wheels-only first (fast/tiny)
-# 2) If any package lacks a wheel, install Rust & retry with sources allowed (verbose)
+# --- Hardened extras install ---
+# 1) Try each package with wheels-only; collect failures.
+# 2) If any failed, install Rust and retry ONLY those (verbose).
 RUN set -eux; \
   PKGS="\
     aiohttp==3.8.4 aiosignal==1.3.1 asgiref==3.6.0 async-timeout==4.0.2 attrs==22.2.0 \
@@ -74,10 +74,21 @@ RUN set -eux; \
     PyYAML==6.0 requests==2.28.1 requests-toolbelt==0.10.1 rich==13.3.1 \
     six==1.16.0 sqlparse==0.4.2 urllib3==1.26.12 webencodings==0.5.1 yarl==1.8.2 zipp==1.0.0 \
   "; \
-  if ! pip install --only-binary=:all: --prefer-binary $PKGS; then \
-    echo '>>> Some packages had no wheels. Installing Rust & retrying with sources allowed…'; \
+  FAILS=""; \
+  for P in $PKGS; do \
+    echo ">>> Trying wheel for $P"; \
+    if ! pip install --only-binary=:all: --prefer-binary "$P"; then \
+      echo "!!! No wheel for $P"; \
+      FAILS="$FAILS $P"; \
+    fi; \
+  done; \
+  if [ -n "$FAILS" ]; then \
+    echo ">>> Installing Rust toolchain for source builds…"; \
     apt-get update -y && apt-get install -y --no-install-recommends rustc cargo && rm -rf /var/lib/apt/lists/*; \
-    pip install -vv --prefer-binary $PKGS; \
+    for P in $FAILS; do \
+      echo ">>> Retrying from source (verbose): $P"; \
+      pip install -vv --prefer-binary "$P"; \
+    done; \
   fi
 
 # App
