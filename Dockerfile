@@ -32,6 +32,9 @@ RUN pip install "numpy==1.24.3" "protobuf>=3.20.3,<5"
 RUN pip install "tensorflow-cpu==2.15.0.post1" && \
     python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
 
+RUN pip install python-multipart && \
+    python -c "import multipart; print('python-multipart OK')"
+
 # MediaPipe (cp310 wheel)
 # Let MP pull its own compatible OpenCV
 RUN pip install --only-binary=:all: "mediapipe==0.10.21" -vv && \
