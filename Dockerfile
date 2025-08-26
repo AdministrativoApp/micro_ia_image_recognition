@@ -1,23 +1,21 @@
-# -------- Base: Python 3.11 on Debian 12 (Bookworm) --------
 FROM python:3.11-slim-bookworm
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DEFAULT_TIMEOUT=120
+    PIP_DEFAULT_TIMEOUT=180
 
 # Fail fast if not amd64
 RUN uname -m | grep -qE 'x86_64|amd64' || (echo "ERROR: Build must target linux/amd64. Set platforms: linux/amd64 in buildx."; exit 1)
 
-# System deps needed by OpenCV/MediaPipe/TensorFlow
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends \
-        ffmpeg libsm6 libxext6 libgl1 libglib2.0-0 \
-        git pkg-config gcc g++ python3-dev && \
-    rm -rf /var/lib/apt/lists/*
+# System deps
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    ffmpeg libsm6 libxext6 libgl1 libglib2.0-0 \
+    git pkg-config gcc g++ python3-dev \
+ && rm -rf /var/lib/apt/lists/*
 
-# Log arch, Python, and pip supported tags (super helpful in CI)
+# Log arch, Python, and pip supported tags (very helpful in CI logs)
 RUN python - <<'PY'
 import platform, sys
 print("ARCH:", platform.machine())
@@ -25,31 +23,48 @@ print("PY:", sys.version)
 try:
     from pip._internal.utils.compatibility_tags import get_supported
     tags = list(get_supported())
-    print("TOP 10 PIP TAGS:", [str(t) for t in tags[:10]])
+    print("TOP 15 PIP TAGS:", [str(t) for t in tags[:15]])
 except Exception as e:
     print("Could not list pip tags:", e)
 PY
 
-# Packaging tools
+# Tooling
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Core pins (compatible with TF 2.15 & MP 0.10.14)
+# Core (compatible with TF/MP)
 RUN pip install "numpy==1.24.3" "protobuf>=3.20.3,<5"
 
-# TensorFlow first (2.15 plays nicely with absl>=2 required by newer MP)
+# TensorFlow first (2.15 pairs well with MP >= 0.10.10)
 RUN pip install "tensorflow-cpu==2.15.0.post1" && \
     python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
 
-# MediaPipe (let it pull its own compatible OpenCV)
-RUN pip install --only-binary=:all: "mediapipe==0.10.14" -vv && \
-    python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)"
+# --- Robust MediaPipe install with fallback & clear diagnostics ---
+# Tries 0.10.14 → 0.10.13 → 0.10.0 with wheels only.
+# If none match your pip tags, prints a clear error and exits.
+RUN set -eux; \
+    MP_VERSIONS="0.10.14 0.10.13 0.10.0"; \
+    ok=0; \
+    for v in $MP_VERSIONS; do \
+      echo ">>> Trying mediapipe==$v (wheels only)"; \
+      if pip install --only-binary=:all: -vv "mediapipe==$v"; then \
+        python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)"; \
+        ok=1; break; \
+      else \
+        echo "!!! Failed mediapipe==$v -- continuing to next version"; \
+      fi; \
+    done; \
+    if [ "$ok" -ne 1 ]; then \
+      echo "*******************************************************************"; \
+      echo "ERROR: No prebuilt wheel for mediapipe matched your environment."; \
+      echo "This usually means your build is NOT linux/amd64 or pip tags mismatch."; \
+      echo "Check the pip tags printed above and ensure platforms: linux/amd64 in CI."; \
+      echo "*******************************************************************"; \
+      exit 1; \
+    fi
 
 # Your main Python stack
 RUN pip install \
-    scipy==1.11.3 \
-    Pillow==10.0.1 \
-    scikit-learn==1.3.2 \
-    joblib==1.3.2 && \
+    scipy==1.11.3 Pillow==10.0.1 scikit-learn==1.3.2 joblib==1.3.2 && \
     python - <<'PY'
 import scipy, PIL, sklearn, joblib
 print("SciPy", scipy.__version__)
@@ -59,10 +74,7 @@ print("Joblib", joblib.__version__)
 PY
 
 RUN pip install \
-    psycopg2-binary==2.9.7 \
-    fastapi==0.104.1 \
-    uvicorn==0.22.0 \
-    python-dotenv==1.0.0 && \
+    psycopg2-binary==2.9.7 fastapi==0.104.1 uvicorn==0.22.0 python-dotenv==1.0.0 && \
     python - <<'PY'
 import psycopg2, fastapi, uvicorn
 from dotenv import load_dotenv
@@ -88,6 +100,5 @@ RUN pip install \
 COPY . .
 RUN mkdir -p features
 
-# Runtime
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
