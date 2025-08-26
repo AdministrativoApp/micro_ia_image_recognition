@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.10-slim-bookworm
 WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -6,61 +6,35 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DEFAULT_TIMEOUT=180
 
-# Fail fast if not amd64
-RUN uname -m | grep -qE 'x86_64|amd64' || (echo "ERROR: Build must target linux/amd64. Set platforms: linux/amd64 in buildx."; exit 1)
+# Fail fast if not amd64 (needed for prebuilt MP wheels)
+RUN uname -m | grep -qE 'x86_64|amd64' || (echo "ERROR: Build must target linux/amd64"; exit 1)
 
-# System deps
+# Minimal system deps for TF/MP/OpenCV
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     ffmpeg libsm6 libxext6 libgl1 libglib2.0-0 \
     git pkg-config gcc g++ python3-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Log arch, Python, and pip supported tags (very helpful in CI logs)
+# (Optional) print arch/Python for logs
 RUN python - <<'PY'
 import platform, sys
-print("ARCH:", platform.machine())
-print("PY:", sys.version)
-try:
-    from pip._internal.utils.compatibility_tags import get_supported
-    tags = list(get_supported())
-    print("TOP 15 PIP TAGS:", [str(t) for t in tags[:15]])
-except Exception as e:
-    print("Could not list pip tags:", e)
+print("ARCH:", platform.machine(), "PY:", sys.version)
 PY
 
-# Tooling
+# Packaging tools
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Core (compatible with TF/MP)
+# Core pins (play nice with TF/MP)
 RUN pip install "numpy==1.24.3" "protobuf>=3.20.3,<5"
 
-# TensorFlow first (2.15 pairs well with MP >= 0.10.10)
+# TensorFlow first (2.15 pairs well with newer MP)
 RUN pip install "tensorflow-cpu==2.15.0.post1" && \
     python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
 
-# --- Robust MediaPipe install with fallback & clear diagnostics ---
-# Tries 0.10.14 → 0.10.13 → 0.10.0 with wheels only.
-# If none match your pip tags, prints a clear error and exits.
-RUN set -eux; \
-    MP_VERSIONS="0.10.14 0.10.13 0.10.0"; \
-    ok=0; \
-    for v in $MP_VERSIONS; do \
-      echo ">>> Trying mediapipe==$v (wheels only)"; \
-      if pip install --only-binary=:all: -vv "mediapipe==$v"; then \
-        python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)"; \
-        ok=1; break; \
-      else \
-        echo "!!! Failed mediapipe==$v -- continuing to next version"; \
-      fi; \
-    done; \
-    if [ "$ok" -ne 1 ]; then \
-      echo "*******************************************************************"; \
-      echo "ERROR: No prebuilt wheel for mediapipe matched your environment."; \
-      echo "This usually means your build is NOT linux/amd64 or pip tags mismatch."; \
-      echo "Check the pip tags printed above and ensure platforms: linux/amd64 in CI."; \
-      echo "*******************************************************************"; \
-      exit 1; \
-    fi
+# MediaPipe (use a tag that has Linux cp310 manylinux_2_28 wheel)
+# Do NOT install opencv separately; let MP resolve it
+RUN pip install --only-binary=:all: "mediapipe==0.10.21" -vv && \
+    python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)"
 
 # Your main Python stack
 RUN pip install \
@@ -84,7 +58,7 @@ print("uvicorn", uvicorn.__version__)
 print("python-dotenv OK")
 PY
 
-# Extra libs (trim if unused)
+# Extras (trim if unused)
 RUN pip install \
     aiohttp==3.8.4 aiosignal==1.3.1 asgiref==3.6.0 async-timeout==4.0.2 attrs==22.2.0 \
     Babel==2.10.3 bcrypt==3.2.2 certifi==2022.9.24 chardet==5.1.0 \
@@ -96,7 +70,7 @@ RUN pip install \
     PyYAML==6.0 requests==2.28.1 requests-toolbelt==0.10.1 rich==13.3.1 \
     six==1.16.0 sqlparse==0.4.2 urllib3==1.26.12 webencodings==0.5.1 yarl==1.8.2 zipp==1.0.0
 
-# App files
+# App
 COPY . .
 RUN mkdir -p features
 
