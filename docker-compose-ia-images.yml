@@ -11,6 +11,7 @@ services:
       - .env  # ✅ Read variables like DB_USER, DB_PASSWORD, etc.
     volumes:
       - ./features:/app/features  # persist feature vectors
+      - ./ssl:/app/ssl  # Mount SSL certificates
     networks:
       - app-network
 
@@ -20,6 +21,7 @@ services:
     restart: always
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./ssl:/app/ssl  # Mount SSL certificates
     environment:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_POLL_INTERVAL=360

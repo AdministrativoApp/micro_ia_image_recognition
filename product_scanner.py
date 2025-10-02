@@ -15,9 +15,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
 from dotenv import load_dotenv
 from collections import defaultdict
-import mediapipe as mp
 import base64, json, requests
-from collections import defaultdict, Counter
 
 # ---------------- Optional FAISS (ANN) ----------------
 _HAS_FAISS = False
@@ -26,61 +24,6 @@ try:
     _HAS_FAISS = True
 except Exception:
     _HAS_FAISS = False
-
-# ---------------- Mediapipe (face/hands masking) ----------------
-mp_face = mp.solutions.face_detection
-mp_hands = mp.solutions.hands
-mp_hands_detection = mp_hands.Hands(
-    static_image_mode=True,
-    max_num_hands=2,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
-mp_face_detection = mp.solutions.face_detection.FaceDetection(
-    model_selection=1, min_detection_confidence=0.5
-)
-
-def mask_humans(img):
-    if img is None or img.size == 0:
-        raise ValueError("❌ mask_humans: Received empty image.")
-    h, w, _ = img.shape
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    masked_img = img.copy()
-
-    # Faces
-    try:
-        results = mp_face_detection.process(img_rgb)
-        if results and results.detections:
-            for det in results.detections:
-                bbox = det.location_data.relative_bounding_box
-                x1 = int(bbox.xmin * w); y1 = int(bbox.ymin * h)
-                x2 = x1 + int(bbox.width * w); y2 = y1 + int(bbox.height * h)
-                if x2 > x1 and y2 > y1:
-                    region = masked_img[y1:y2, x1:x2]
-                    if region.size > 0:
-                        masked_img[y1:y2, x1:x2] = cv2.GaussianBlur(region, (55, 55), 30)
-    except Exception:
-        pass
-
-    # Hands
-    try:
-        hand_results = mp_hands_detection.process(img_rgb)
-        if hand_results and hand_results.multi_hand_landmarks:
-            for hand_landmarks in hand_results.multi_hand_landmarks:
-                x_coords = [int(lm.x * w) for lm in hand_landmarks.landmark]
-                y_coords = [int(lm.y * h) for lm in hand_landmarks.landmark]
-                x1 = max(min(x_coords) - 10, 0)
-                y1 = max(min(y_coords) - 10, 0)
-                x2 = min(max(x_coords) + 10, w)
-                y2 = min(max(y_coords) + 10, h)
-                if x2 > x1 and y2 > y1:
-                    region = masked_img[y1:y2, x1:x2]
-                    if region.size > 0:
-                        masked_img[y1:y2, x1:x2] = cv2.GaussianBlur(region, (55, 55), 30)
-    except Exception:
-        pass
-
-    return masked_img
 
 # ---------------- Env / DB ----------------
 load_dotenv()
@@ -108,28 +51,8 @@ def deepseek_read_label(img_bgr):
         return {"percent": None, "volume_ml": None, "badge_color": None}
     img_b64 = _b64_png_from_bgr(img_bgr)
     prompt = (
-        "UNIVERSAL PRODUCT LABEL READER — JSON ONLY\n"
-        "\n"
-        "Goal: From the given photo, read ONLY the text printed on the MAIN product’s label and return a JSON object with:\n"
-        '  - percent: number|null  — concentration printed as a percent. Accept forms like "3.15%", "3,15 %", "3.15Z" (stylized %), "1 %", "70%".\n'
-        "    • Use dot as decimal separator (3,15 → 3.15). Range 0–100. If multiple percents appear, pick the one that looks most central/prominent\n"
-        "      or inside a circular/elliptical callout badge. If uncertain or absent, use null.\n"
-        "  - volume_ml: number|null — liquid volume in milliliters (ml). Accept “500 ml”, “0.5 L”→500, “1 L”→1000, “50 cl”→500.\n"
-        "    • Convert L/cl/lt to ml. Ignore mass units (g, kg, mg, oz) and counts (e.g., 12 pack). If not visible, null.\n"
-        '  - badge_color: "red"|"blue"|"green"|"yellow"|"orange"|"purple"|"black"|"white"|"other"|null —\n'
-        "    • Dominant color of a circular/elliptical numeric callout (often containing the percent). If no such badge, null.\n"
-        "\n"
-        "Rules:\n"
-        "• Read the largest/closest product only; ignore background items, screens, UI, reflections, barcodes, prices, phone numbers, dates.\n"
-        "• Consider labels in any language (en/es/pt etc.).\n"
-        "• Do NOT guess. If a field is not clearly visible, return null.\n"
-        "• Output MUST be exactly one JSON object with only these keys and simple values (no extra text).\n"
-        "\n"
-        "Examples:\n"
-        '• Red round badge “3.15Z”, text “500 ml”  → {"percent": 3.15, "volume_ml": 500, "badge_color": "red"}\n'
-        '• Blue badge “1%”, text “250ml”          → {"percent": 1,    "volume_ml": 250, "badge_color": "blue"}\n'
-        '• Label shows “70% alcohol”, “1 L”       → {"percent": 70,   "volume_ml": 1000,"badge_color": "other"}\n'
-        '• No percent or volume visible           → {"percent": null, "volume_ml": null,"badge_color": null}\n'
+        "You are a label reader. Extract ONLY what is printed on the product label.\n"
+        "Return strict JSON with keys: percent (number or null), volume_ml (number or null), badge_color (string or null)."
     )
     url = f"{DEEPSEEK_API_BASE}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
@@ -138,14 +61,12 @@ def deepseek_read_label(img_bgr):
         "messages": [
             {"role": "system", "content": prompt},
             {"role": "user", "content": [
-                 {"type":"input_text","text":"Return JSON only."},
+                {"type":"input_text","text":"Read the label and extract values."},
                 {"type":"input_image","image_url": f"data:image/png;base64,{img_b64}"}
             ]}
         ],
-         "temperature": 0,
-         "top_p": 0.1,
-         "response_format": {"type": "json_object"}  # if the API supports it; safe to include
-        }
+        "temperature": 0
+    }
     try:
         resp = requests.post(url, headers=headers, data=json.dumps(data), timeout=30)
         resp.raise_for_status()
@@ -238,149 +159,6 @@ def _multicrops(img):
     # ensure non-empty
     return [c for c in crops if c.size]
 
-
-def _find_badge_roi(img_bgr):
-    if img_bgr is None or img_bgr.size == 0:
-        return None
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-
-    sat = hsv[...,1] > 90
-    val = hsv[...,2] > 80
-    red1 = (hsv[...,0] < 10) & sat & val
-    red2 = (hsv[...,0] > 160) & sat & val
-    blue = (hsv[...,0] > 95) & (hsv[...,0] < 135) & sat & val
-    mask = (red1 | red2 | blue).astype(np.uint8) * 255
-
-    # stronger cleanup → smoother circle edges
-    k = np.ones((5,5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
-    mask = cv2.GaussianBlur(mask, (7,7), 0)
-
-    # Run Hough on the masked region only
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bitwise_and(gray, gray, mask=mask)
-    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=40,
-                               param1=120, param2=40, minRadius=16, maxRadius=120)
-
-    h, w = img_bgr.shape[:2]
-    if circles is not None:
-        circles = np.uint16(np.around(circles[0]))
-        # biggest circle (badge) wins
-        x, y, r = max(circles, key=lambda c: c[2])
-        pad = int(0.25*r)
-        x1, y1 = max(0, x-r-pad), max(0, y-r-pad)
-        x2, y2 = min(w, x+r+pad), min(h, y+r+pad)
-        roi = img_bgr[y1:y2, x1:x2]
-        return roi if roi.size else None
-
-    # fallback: your previous contour logic
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts: 
-        return None
-    x,y,ww,hh = max((cv2.boundingRect(c) for c in cnts), key=lambda b:b[2]*b[3])
-    pad = int(max(8, 0.2*max(ww,hh)))
-    return img_bgr[max(0,y-pad):min(h,y+hh+pad), max(0,x-pad):min(w,x+ww+pad)]
-
-
-def _ocr_digits_only(img_bgr):
-    if img_bgr is None or img_bgr.size == 0:
-        return None
-
-    def _prep(img, invert=False):
-        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        g = cv2.bilateralFilter(g, 7, 50, 50)
-        thr = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                    cv2.THRESH_BINARY_INV if not invert else cv2.THRESH_BINARY,
-                                    31, 15)
-        thr = cv2.morphologyEx(thr, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
-        return cv2.resize(thr, None, fx=2.2, fy=2.2, interpolation=cv2.INTER_CUBIC)
-
-    candidates = []
-    for invert in (False, True):
-        thr = _prep(img_bgr, invert=invert)
-        try:
-            import pytesseract
-            # try “single char” and “single line”
-            for psm in (10, 7, 8, 13):
-                cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789.,%"
-                txt = pytesseract.image_to_string(thr, config=cfg).strip()
-                if txt:
-                    candidates.append(txt)
-        except Exception:
-            pass
-        # EasyOCR fallback
-        try:
-            if _HAS_EASYOCR and _EASYOCR_READER is not None:
-                res = _EASYOCR_READER.readtext(thr, detail=0, paragraph=False)
-                candidates += res or []
-        except Exception:
-            pass
-
-    # normalize and vote
-    nums = []
-    for t in candidates:
-        m = re.search(r"(\d+(?:[.,]\d+)?)", t)
-        if not m: 
-            continue
-        v = float(m.group(1).replace(",", "."))
-        if 0.0 <= v <= 10.0:
-            nums.append(round(v, 2))
-
-    if not nums:
-        return None
-
-    # prefer exact “1.0/1/3.15” if present, else median
-    # (avoids 1 → 3 outliers)
-    if 1.0 in nums or 1 in nums: 
-        return 1.0
-    if 3.15 in nums: 
-        return 3.15
-    return float(np.median(nums))
-
-def read_badge_percent(img_bgr):
-    """High-confidence % from the colored badge, if present."""
-    roi = _find_badge_roi(img_bgr)
-    if roi is None: 
-        return None
-    return _ocr_digits_only(roi)
-
-def _badge_color_name(roi_bgr):
-    """Return human color name for the badge ROI: 'red'/'blue'/'green'/'yellow'/'other'/None."""
-    if roi_bgr is None or roi_bgr.size == 0:
-        return None
-    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
-    h = hsv[..., 0]
-    s = hsv[..., 1]
-    v = hsv[..., 2]
-    # basic saturation/brightness check
-    if float(np.mean(s)) < 60 or float(np.mean(v)) < 60:
-        return None
-    # pick dominant hue from saturated pixels
-    mask = s > 60
-    hue = float(np.median(h[mask])) if np.any(mask) else float(np.median(h))
-    if hue < 10 or hue > 160:
-        return "red"
-    if 95 < hue < 135:
-        return "blue"
-    if 25 < hue < 40:
-        return "yellow"
-    if 40 <= hue <= 85:
-        return "green"
-    return "other"
-
-
-def _badge_color_from_image_path(feature_path):
-    """
-    Use the saved _image.jpg next to the feature to estimate badge color.
-    """
-    img_path = feature_path.replace("_feature.joblib", "_image.jpg")
-    if not os.path.exists(img_path):
-        return None
-    img = cv2.imread(img_path)
-    roi = _find_badge_roi(img)
-    return _badge_color_name(roi)
-
-
 # ---------------- Product Scanner (generic pipeline) ----------------
 class ProductScannerSQL:
     def __init__(self, db_url, features_dir='features'):
@@ -410,26 +188,7 @@ class ProductScannerSQL:
         self.knn = None
         self.is_trained = False
 
-        self.sim_threshold_global = 0.45
-        self.prod_index = None
-
-    def audit_numeric_payloads(self):
-        bad = []
-        for fp, name in zip(self.file_paths or [], self.y or []):
-            try:
-                p = joblib.load(fp)
-                rn = p.get("numeric")
-                ok = isinstance(rn, (list, tuple, np.ndarray)) and len(rn) >= 3
-                pct = rn[0]*10.0 if ok and rn[0] > 0 else None
-                ml  = rn[2]*1000.0 if ok and rn[2] > 0 else None
-                if pct is None or pct > 10 or pct < 0:
-                    bad.append((name, fp, "percent", pct))
-                if ml is not None and (ml < 20 or ml > 5000):
-                    bad.append((name, fp, "ml", ml))
-            except Exception as e:
-                bad.append((name, fp, "load_error", str(e)))
-        return bad
-
+        self.sim_threshold_global = 0.48
 
     # ---------- DB ----------
     def ensure_tables(self):
@@ -513,137 +272,7 @@ class ProductScannerSQL:
         ], axis=0).astype(np.float32)
 
         return coarse, fine
-    
-    def _resolve_feature_path(self, file_path):
-        """
-        Return a valid absolute path to the feature file if possible.
-        Tries original, absolute, features_dir+basename.
-        Updates DB to the corrected path when fixed.
-        """
-        original = file_path
-        candidates = []
-        # 1) as-is
-        candidates.append(file_path)
-        # 2) absolute of as-is
-        if not os.path.isabs(file_path):
-            candidates.append(os.path.abspath(file_path))
-        # 3) features_dir + basename
-        candidates.append(os.path.abspath(os.path.join(self.features_dir, os.path.basename(file_path))))
 
-        for p in candidates:
-            if os.path.exists(p):
-                if p != original:
-                    try:
-                        self.cursor.execute(
-                            "UPDATE product_vectors SET file_path=%s WHERE file_path=%s",
-                            (p, original)
-                        )
-                        self.conn.commit()
-                        print(f"🛠️  Fixed stale path in DB:\n    {original}\n -> {p}")
-                    except Exception as e:
-                        print(f"⚠️ Could not update DB path ({e})")
-                return p
-        return None  # not found
-
-    def _self_heal_feature(self, feature_path):
-        """
-        If the .joblib is missing but the paired _image.jpg exists,
-        re-extract payload and save a new .joblib. Returns True if healed.
-        """
-        img_path = feature_path.replace("_feature.joblib", "_image.jpg")
-        if os.path.exists(img_path):
-            img = cv2.imread(img_path)
-            if img is not None:
-                try:
-                    payload = self._extract_payload(img)
-                    os.makedirs(os.path.dirname(feature_path), exist_ok=True)
-                    joblib.dump(payload, feature_path)
-                    print(f"🩹 Rebuilt missing feature from image:\n    {feature_path}")
-                    return True
-                except Exception as e:
-                    print(f"❌ Failed to rebuild feature ({e})")
-        return False
-    
-    def _tokenize(self, text: str):
-        text = (text or "").lower()
-        text = re.sub(r"[^a-z0-9%\. ]+", " ", text)
-        return set(t for t in text.split() if t)
-
-    def _majority(self, counter: Counter):
-        return counter.most_common(1)[0][0] if counter else None
-    
-    def _ref_pct_from_payload_idx(self, i):
-        try:
-            rn = joblib.load(self.file_paths[i])["numeric"]
-            return rn[0]*10.0 if rn[0] > 0 else None
-        except Exception:
-            return None
-
-    def _pct_from_name(self, name):
-        m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(name))
-        return float(m.group(1)) if m else None
-
-    def _build_product_index(self):
-        """
-        Aggregate all saved views per product into a canonical profile
-        (majority % / ml / badge color, union of tokens, file_paths list).
-        """
-        self.cursor.execute("""
-            SELECT pv.file_path, p.name
-            FROM product_vectors pv
-            JOIN products p ON p.id = pv.product_id
-        """)
-        rows = self.cursor.fetchall()
-
-        by_product = defaultdict(lambda: {
-            "percents": Counter(),
-            "volumes": Counter(),
-            "colors":  Counter(),
-            "tokens":  set(),
-            "file_paths": []
-        })
-
-        for fp, name in rows:
-            fpath = self._resolve_feature_path(fp) or fp
-            if not os.path.exists(fpath):
-                # try auto-heal into canonical location
-                alt = os.path.abspath(os.path.join(self.features_dir, os.path.basename(fp)))
-                if not os.path.exists(alt):
-                    continue
-                fpath = alt
-
-            try:
-                payload = joblib.load(fpath)
-            except Exception:
-                continue
-
-            by_product[name]["file_paths"].append(fpath)
-
-            # percent/ml from stored numeric (scaled) if available
-            rn = payload.get("numeric")
-            if isinstance(rn, (list, tuple, np.ndarray)) and len(rn) >= 3:
-                try:
-                    p_pct = rn[0] * 10.0 if rn[0] > 0 else None
-                    p_ml  = rn[2] * 1000.0 if rn[2] > 0 else None
-                except Exception:
-                    p_pct = None; p_ml = None
-                if isinstance(p_pct, (int,float)):
-                    by_product[name]["percents"][round(float(p_pct), 3)] += 1
-                if isinstance(p_ml, (int,float)):
-                    by_product[name]["volumes"][round(float(p_ml), 1)] += 1
-
-            # tokens from OCR text (if present)
-            toks = self._tokenize(payload.get("ocr_text", ""))
-            by_product[name]["tokens"].update(toks)
-
-            # majority badge color from the saved image (optional, cheap)
-            col = _badge_color_from_image_path(fpath)
-            if col:
-                by_product[name]["colors"][col] += 1
-
-        self.prod_index = by_product
- 
-    
     # ---------- Storage ----------
     def add_product(self, product_name, product_sku, img_array):
         try:
@@ -656,17 +285,9 @@ class ProductScannerSQL:
 
             payload = self._extract_payload(img_array)
 
-            # Force percent from badge if readable (keeps references correct)
-            try:
-                bp = read_badge_percent(self._label_roi(img_array))
-                if bp is not None and 0.0 <= bp <= 10.0:
-                    payload["numeric"][0] = float(bp) / 10.0  # 1% -> 0.10
-            except Exception:
-                pass
-
             vector_id = str(uuid.uuid4())
-            feature_path = os.path.abspath(os.path.join(self.features_dir, f"{vector_id}_feature.joblib"))
-            image_path   = os.path.abspath(os.path.join(self.features_dir, f"{vector_id}_image.jpg"))
+            feature_path = os.path.join(self.features_dir, f"{vector_id}_feature.joblib")
+            image_path   = os.path.join(self.features_dir, f"{vector_id}_image.jpg")
 
             joblib.dump(payload, feature_path)
             cv2.imwrite(image_path, img_array)
@@ -677,7 +298,6 @@ class ProductScannerSQL:
             )
             self.conn.commit()
             self.is_trained = False
-            self.prod_index = None
             print(f"✅ Added vector to product: {product_name} (SKU: {product_sku})")
             return True
         except Exception as e:
@@ -709,41 +329,25 @@ class ProductScannerSQL:
         rows = self.cursor.fetchall()
         if not rows:
             print("⚠️ No vectors available for training.")
+            self.is_trained = False
             return False
 
         payloads, labels, paths = [], [], []
         for file_path, name in rows:
             try:
-                fpath = self._resolve_feature_path(file_path)
-                if fpath is None:
-                    # try auto-heal in canonical location
-                    alt = os.path.abspath(os.path.join(self.features_dir, os.path.basename(file_path)))
-                    if self._self_heal_feature(alt):
-                        fpath = alt
-                        try:
-                            self.cursor.execute(
-                                "UPDATE product_vectors SET file_path=%s WHERE file_path=%s",
-                                (fpath, file_path)
-                            )
-                            self.conn.commit()
-                        except Exception as e:
-                            print(f"⚠️ Could not update DB after heal ({e})")
-                    else:
-                        print(f"⚠️ Missing feature file: {file_path}")
-                        continue
-
-                payloads.append(joblib.load(fpath))
+                payloads.append(joblib.load(file_path))
                 labels.append(name)
-                paths.append(fpath)
+                paths.append(file_path)
             except Exception as e:
                 print(f"⚠️ Could not load {file_path}: {e}")
 
-        # If nothing loaded, abort gracefully (prevents np.stack crash)
+        # Check if we have any payloads to train on
         if not payloads:
-            print("⚠️ No usable feature payloads found. "
-                "Check that your 'features/' files exist and DB file paths are valid.")
+            print("⚠️ No product vectors found for training. Add some products first.")
+            self.is_trained = False
             return False
 
+        # PCA on CNN (fit on global vectors only)
         cnn_bank = np.stack([p["cnn"] for p in payloads]).astype(np.float32)
         try:
             n_comp = min(self.coarse_dim, len(cnn_bank))
@@ -766,7 +370,19 @@ class ProductScannerSQL:
             ngram_range=(1,2),
             min_df=1
         )
-        _ = self.vectorizer.fit([p["ocr_text"] for p in payloads])
+        # Check if we have valid OCR text in any payload
+        ocr_texts = [p["ocr_text"] for p in payloads]
+        if any(text.strip() for text in ocr_texts):
+            try:
+                _ = self.vectorizer.fit(ocr_texts)
+            except ValueError as e:
+                print(f"⚠️ TF-IDF fitting failed: {e}. Using empty vectorizer.")
+                self.vectorizer = TfidfVectorizer(max_features=1)
+                _ = self.vectorizer.fit(["placeholder"])
+        else:
+            print("⚠️ No valid OCR text found. Using empty vectorizer.")
+            self.vectorizer = TfidfVectorizer(max_features=1)
+            _ = self.vectorizer.fit(["placeholder"])
 
         # Fine bank (+ caches)
         fine_bank = []
@@ -828,9 +444,8 @@ class ProductScannerSQL:
         roi = img[y1:y2, x1:x2]
         return roi if roi.size else img
 
-    def _load_ref_image(self, file_path):
-        p = self._resolve_feature_path(file_path) or file_path
-        img_path = (p if p else file_path).replace("_feature.joblib", "_image.jpg")
+    def _load_ref_image(self, feature_path):
+        img_path = feature_path.replace("_feature.joblib", "_image.jpg")
         if os.path.exists(img_path):
             return cv2.imread(img_path)
         return None
@@ -854,65 +469,48 @@ class ProductScannerSQL:
             return max(0.0, min(1.0, len(good) / denom))
         except Exception:
             return 0.0
-        
 
-    # ---------- Recognition ----------ss
+    # ---------- Recognition ----------
     def recognize(self, img_array):
         if not self.is_trained and not self.train():
             return None
 
-        # ---- Build query vectors ----
+        # Build query vectors
         q_payload = self._extract_payload(img_array)
         q_coarse, q_fine = self._build_vectors(q_payload)
         q_coarse_n = q_coarse.astype(np.float32)
         q_coarse_n /= (np.linalg.norm(q_coarse_n) + 1e-8)
         qf = q_fine / (np.linalg.norm(q_fine) + 1e-8)
         q_tfidf = self.vectorizer.transform([q_payload["ocr_text"]]).astype(np.float32).toarray()[0]
-        qn = q_payload["numeric"]
 
-        # ---- Numeric cues ----
-        try:
-            badge_percent = read_badge_percent(self._label_roi(img_array))
-        except Exception:
-            badge_percent = None
-
-        ds_percent = None; ds_volume = None
+        # ---- NEW: read numeric with DeepSeek on label ROI (fallback to OCR) ----
+        ds_percent = None
+        ds_volume  = None
         try:
             ds = deepseek_read_label(self._crop_for_ds(img_array))
-            ds_percent = ds.get("percent"); ds_volume = ds.get("volume_ml")
+            ds_percent = ds.get("percent")
+            ds_volume  = ds.get("volume_ml")
         except Exception:
             pass
 
-        ocr_percent = qn[0] * 10.0 if qn[0] > 0 else None
-        ocr_volume  = qn[2] * 1000.0 if qn[2] > 0 else None
+        qn = q_payload["numeric"]
+        q_percent_ocr = qn[0] * 10.0 if qn[0] > 0 else None
+        q_volume_ocr  = qn[2] * 1000.0 if qn[2] > 0 else None
 
-        try:
-            roi = _find_badge_roi(img_array)
-            badge_color = _badge_color_name(roi)
-        except Exception:
-            badge_color = None
+        # Prefer DS when available; otherwise OCR
+        q_percent = ds_percent if ds_percent is not None else q_percent_ocr
+        q_volume  = ds_volume  if ds_volume  is not None else q_volume_ocr
 
-        q_percent = None; q_percent_conf = 0.0
-        if badge_percent is not None:
-            q_percent, q_percent_conf = float(badge_percent), 0.95
-        elif ds_percent is not None:
-            q_percent, q_percent_conf = float(ds_percent), 0.80
-        elif ocr_percent is not None:
-            q_percent, q_percent_conf = float(ocr_percent), 0.60
+        # (Optional) debug
+        if q_percent is not None:
+            print(f"🔎 Detected %: {q_percent}")
+        if q_volume is not None:
+            print(f"🔎 Detected ml: {q_volume}")
 
-        q_volume = None; q_volume_conf = 0.0
-        if ds_volume is not None:
-            q_volume, q_volume_conf = float(ds_volume), 0.75
-        elif ocr_volume is not None:
-            q_volume, q_volume_conf = float(ocr_volume), 0.55
-
-        if badge_color == "blue" and q_percent is not None and 0.7 <= q_percent <= 1.4:
-            q_percent, q_percent_conf = 1.0, 0.99
-
-        # ---- Stage A: coarse retrieval (once) ----
-        K = min(200, len(self.X))
+        # ANN retrieval (top-K)
+        K = min(100, len(self.X))
         if _HAS_FAISS and self.faiss_index is not None:
-            sims, idx = self.faiss_index.search(q_coarse_n[None, :], K)
+            sims, idx = self.faiss_index.search(q_coarse_n[None, :], K)  # cosine via inner product
             cand_idx = idx[0].tolist()
             base_sims = sims[0].tolist()
         else:
@@ -920,145 +518,49 @@ class ProductScannerSQL:
             cand_idx = idx[0].tolist()
             base_sims = [1.0 - float(d) for d in dist[0].tolist()]
 
-        # ---- DeepSeek hard gate on % (authoritative) ----
-        FORCE_DS_HARD = True
-        if FORCE_DS_HARD and ds_percent is not None:
-            target_pct = float(ds_percent)
-            pct_gate = 0.30
-            kept = []
-            for i, b in zip(cand_idx, base_sims):
-                rp = self._ref_pct_from_payload_idx(i)
-                if rp is None:
-                    rp = self._pct_from_name(self.y[i])
-                if rp is not None and abs(rp - target_pct) <= pct_gate:
-                    kept.append((i, b))
-            if not kept:
-                print(f"❌ DeepSeek says {target_pct}% and no reference matches → reject.")
-                return None
-            cand_idx, base_sims = map(list, zip(*kept))
-            print(f"🧱 DeepSeek % gate kept {len(cand_idx)}/{K} (±{pct_gate:.2f}%)")
-
-        if not cand_idx:
-            return None
-
-        # ---- Group by family (name) and keep top families ----
-        fam_scores = {}
-        for i, s in zip(cand_idx, base_sims):
-            fam = self.y[i]
-            fam_scores[fam] = max(fam_scores.get(fam, -1.0), s)
-        top_families = sorted(fam_scores.items(), key=lambda x: x[1], reverse=True)[:10]
-        fam_names = [f for f, _ in top_families]
-
-        if self.prod_index is None:
-            self._build_product_index()
-
-        # ---- Mandatory gates within families ----
-        fam_member_idx = [i for i in cand_idx if self.y[i] in fam_names]
-        fam_member_base = [b for i, b in zip(cand_idx, base_sims) if self.y[i] in fam_names]
-        if not fam_member_idx:
-            return None
-
-        def _ref_pct(i):
-            try:
-                rn = joblib.load(self.file_paths[i])["numeric"]
-                return rn[0]*10.0 if rn[0] > 0 else None
-            except Exception:
-                return None
-
-        def _ref_ml(i):
-            try:
-                rn = joblib.load(self.file_paths[i])["numeric"]
-                return rn[2]*1000.0 if rn[2] > 0 else None
-            except Exception:
-                return None
-
-        pct_gate = 0.30 if (q_percent is not None and q_percent_conf >= 0.90) else 0.60
-        ml_gate  = 80.0 if (q_volume  is not None and q_volume_conf  >= 0.70) else 160.0
-
-        gated_idx, gated_base = fam_member_idx, fam_member_base
-        if q_percent is not None:
-            ki, kb = [], []
-            for i, b in zip(gated_idx, gated_base):
-                rp = _ref_pct(i)
-                if rp is None or abs(rp - q_percent) <= pct_gate:
-                    ki.append(i); kb.append(b)
-            if not ki and q_percent_conf >= 0.80:
-                print("❌ hard % gate reject")
-                return None
-            if ki:
-                gated_idx, gated_base = ki, kb
-                print(f"🧱 % gate kept {len(gated_idx)}/{len(fam_member_idx)} (±{pct_gate:.2f}%)")
-
-        if q_volume is not None and gated_idx:
-            ki, kb = [], []
-            for i, b in zip(gated_idx, gated_base):
-                rm = _ref_ml(i)
-                if rm is None or abs(rm - q_volume) <= ml_gate:
-                    ki.append(i); kb.append(b)
-            if not ki and q_volume_conf >= 0.70:
-                print("❌ hard ml gate reject")
-                return None
-            if ki:
-                gated_idx, gated_base = ki, kb
-                print(f"🧱 ml gate kept {len(gated_idx)}/{len(fam_member_idx)} (±{ml_gate:.0f}ml)")
-
-        if not gated_idx:
-            return None
-
-        # ---- Re-rank remaining ----
-        PCT_TOL_SOFT = 0.60
-        PCT_TOL_HARD = 0.10
-        ML_TOL       = 120.0
-
-        agree_sources = 0
-        src_vals = [v for v in (badge_percent, ds_percent, ocr_percent) if v is not None]
-        if len(src_vals) >= 2:
-            for a in src_vals:
-                for b in src_vals:
-                    if a is b:
-                        continue
-                    if abs(float(a) - float(b)) <= 0.30:
-                        agree_sources = 2; break
-                if agree_sources >= 2:
-                    break
+        # --- Generic multi-modal re-rank + numeric contradiction penalty ---
+        PCT_TOL = 0.08    # 0.08% tolerance; tune 0.05–0.15
+        ML_TOL  = 100.0   # 100 ml tolerance
 
         def score_candidate(i, base_sim):
             rf = self.fine_bank_norm[i]
             sim_visual = float(np.dot(qf, rf))
 
             rt = self.tfidf_bank[i]
-            sim_ocr = 0.0
             if np.linalg.norm(q_tfidf) > 0 and np.linalg.norm(rt) > 0:
                 sim_ocr = float(np.dot(q_tfidf, rt) /
-                                ((np.linalg.norm(q_tfidf)+1e-8)*(np.linalg.norm(rt)+1e-8)))
+                                ((np.linalg.norm(q_tfidf) + 1e-8) * (np.linalg.norm(rt) + 1e-8)))
+            else:
+                sim_ocr = 0.0
 
             rn = joblib.load(self.file_paths[i])["numeric"]
-            sim_num = 0.0
             if np.linalg.norm(qn) > 0 and np.linalg.norm(rn) > 0:
                 sim_num = float(np.dot(qn, rn) /
-                                ((np.linalg.norm(qn)+1e-8)*(np.linalg.norm(rn)+1e-8)))
+                                ((np.linalg.norm(qn) + 1e-8) * (np.linalg.norm(rn) + 1e-8)))
+            else:
+                sim_num = 0.0
 
-            r_percent = rn[0]*10.0 if rn[0] > 0 else None
-            r_volume  = rn[2]*1000.0 if rn[2] > 0 else None
+            # ref numeric in human units
+            r_percent = rn[0] * 10.0 if rn[0] > 0 else None
+            r_volume  = rn[2] * 1000.0 if rn[2] > 0 else None
 
+            # Strong, generic penalty if DS/OCR contradict ref
             penalty = 0.0
-            if q_percent is not None and r_percent is not None:
-                diff = abs(q_percent - r_percent)
-                if agree_sources >= 2 and diff > PCT_TOL_HARD:
-                    penalty += 0.60
-                elif diff > PCT_TOL_SOFT:
-                    penalty += 0.25
-            if q_volume is not None and r_volume is not None:
-                if abs(q_volume - r_volume) > ML_TOL:
-                    penalty += 0.15 if q_volume_conf >= 0.70 else 0.05
+            if q_percent is not None and r_percent is not None and abs(q_percent - r_percent) > PCT_TOL:
+                penalty += 0.60
+            if q_volume  is not None and r_volume  is not None and abs(q_volume - r_volume) > ML_TOL:
+                penalty += 0.15
 
-            return (0.45*base_sim + 0.33*sim_visual + 0.17*sim_ocr + 0.05*sim_num) - penalty
+            score = (0.50*base_sim + 0.30*sim_visual + 0.15*sim_ocr + 0.05*sim_num) - penalty
+            return score
 
-        prelim = [(i, score_candidate(i, b)) for b, i in zip(gated_base, gated_idx)]
+        prelim = []
+        for base_sim, i in zip(base_sims, cand_idx):
+            prelim.append((i, score_candidate(i, base_sim)))
         prelim.sort(key=lambda x: x[1], reverse=True)
         prelim = prelim[:20]
 
-        # ---- ORB geometric verification ----
+        # Geometric verification on label region (ORB)
         finals = []
         for i, s in prelim:
             r_img = self._load_ref_image(self.file_paths[i])
@@ -1070,7 +572,16 @@ class ProductScannerSQL:
         best_score = finals[0][1]
         best_label = self.y[best_idx]
 
-        # ---- Centroid acceptance ----
+        # --- Final hard guard: if DS/OCR % contradicts chosen ref → reject ---
+        if q_percent is not None:
+            ref = joblib.load(self.file_paths[best_idx])
+            rn  = ref["numeric"]
+            r_percent = rn[0] * 10.0 if rn[0] > 0 else None
+            if r_percent is not None and abs(q_percent - r_percent) > PCT_TOL:
+                print(f"❌ Rejected by % mismatch: query {q_percent} vs ref {r_percent}")
+                return None
+
+        # Centroid-based acceptance (class-agnostic)
         c, mu, sigma = self.sku_stats.get(best_label, (None, 0.3, 0.1))
         if c is not None:
             dist_to_centroid = 1.0 - float(np.dot(qf, c))
@@ -1081,10 +592,6 @@ class ProductScannerSQL:
         if confidence < self.sim_threshold_global:
             return None
         return {"label": best_label, "confidence": confidence}
-
-
-
-
     
 # ---------------- CLI / Camera flow (kept) ----------------
 def main():
@@ -1102,14 +609,6 @@ def main():
         pass
 
     scanner = ProductScannerSQL(db_url=db_url)
-    scanner.train()
-    issues = scanner.audit_numeric_payloads()
-    if issues:
-        print(f"[AUDIT] Found {len(issues)} payload issues")
-        for name, fp, what, val in issues[:25]:
-            print(f"  - {name} | {what}={val} | {fp}")
-    else:
-        print("[AUDIT] No payload issues found")
 
     # Try multiple video devices
     video_devices = [0, 2, 1]
@@ -1143,7 +642,7 @@ def main():
             print("❌ Camera error.")
             break
 
-        filtered_frame = mask_humans(frame)
+        filtered_frame = frame
 
         try:
             cv2.imshow('Product Scanner', filtered_frame)
@@ -1173,7 +672,7 @@ def main():
                             if not ret:
                                 print("❌ Camera error.")
                                 break
-                            filtered_preview = mask_humans(frame)
+                            filtered_preview = frame
                             display = filtered_preview.copy()
                             cv2.putText(display, f"Capture {captured + 1}/5 - [SPACE]=save  [ESC]=cancel",
                                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -1212,7 +711,6 @@ def main():
             break
 
     cap.release()
-    mp_face_detection.close()
     cv2.destroyAllWindows()
     print("👋 Scanner closed.")
 

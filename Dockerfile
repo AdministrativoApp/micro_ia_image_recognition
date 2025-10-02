@@ -16,6 +16,9 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     libffi-dev libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
+# Copy SSL certificates (optional - you can also mount them)
+COPY ssl/ /app/ssl/ 
+
 # (Optional) print arch/Python
 RUN python - <<'PY'
 import platform, sys
