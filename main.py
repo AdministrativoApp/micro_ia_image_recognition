@@ -20,7 +20,7 @@ router = APIRouter(prefix="/despacho")
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:8000", "https://develop.globaldv.tech"],
+    allow_origins=["http://localhost:5173", "http://localhost:8000", "https://develop.globaldv.tech", "https://192.168.0.211"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
