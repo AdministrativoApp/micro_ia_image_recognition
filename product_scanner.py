@@ -322,7 +322,7 @@ class ProductScannerSQL:
     # ---------- Training ----------
     def train(self):
         self.cursor.execute("""
-            SELECT pv.file_path, p.name
+            SELECT pv.file_path, p.name, p.sku
             FROM product_vectors pv
             JOIN products p ON p.id = pv.product_id
         """)
@@ -333,10 +333,10 @@ class ProductScannerSQL:
             return False
 
         payloads, labels, paths = [], [], []
-        for file_path, name in rows:
+        for file_path, name, sku in rows:
             try:
                 payloads.append(joblib.load(file_path))
-                labels.append(name)
+                labels.append(sku)
                 paths.append(file_path)
             except Exception as e:
                 print(f"⚠️ Could not load {file_path}: {e}")
