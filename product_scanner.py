@@ -139,6 +139,47 @@ def global_hsv_hist(img_bgr, bins=16):
     hist, _ = np.histogram(h, bins=bins, range=(0,180), density=True)
     return hist.astype(np.float32)
 
+def extract_dominant_colors(img_bgr, k=3):
+    """Extract dominant colors using K-means clustering."""
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    pixels = img_rgb.reshape(-1, 3).astype(np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+    _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+    centers = centers.astype(np.uint8)
+    # Sort by frequency
+    unique, counts = np.unique(labels, return_counts=True)
+    sorted_indices = np.argsort(counts)[::-1]
+    dominant_colors = centers[sorted_indices]
+    return dominant_colors.flatten().astype(np.float32)
+
+def color_similarity(colors1, colors2):
+    """Compute similarity between two sets of dominant colors."""
+    if len(colors1) != len(colors2):
+        return 0.0
+    # Reshape to RGB arrays
+    c1 = colors1.reshape(-1, 3)
+    c2 = colors2.reshape(-1, 3)
+    # Compute pairwise distances and find best matches
+    distances = []
+    for color1 in c1:
+        min_dist = min(np.linalg.norm(color1 - color2) for color2 in c2)
+        distances.append(min_dist)
+    # Average distance, convert to similarity (0-1, higher is more similar)
+    avg_dist = np.mean(distances)
+    return max(0.0, 1.0 - avg_dist / 255.0)
+
+def color_moments(img_bgr):
+    """Compute color moments (mean, std, skewness) for each channel."""
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    moments = []
+    for channel in range(3):
+        ch = img_rgb[..., channel].flatten().astype(np.float32)
+        mean = np.mean(ch)
+        std = np.std(ch)
+        skewness = np.mean(((ch - mean) / (std + 1e-8)) ** 3)
+        moments.extend([mean, std, skewness])
+    return np.array(moments, dtype=np.float32)
+
 # ---------- NEW: generic multi-crop utility ----------
 def _multicrops(img):
     """Return generic local crops to capture small label differences."""
@@ -188,7 +229,7 @@ class ProductScannerSQL:
         self.knn = None
         self.is_trained = False
 
-        self.sim_threshold_global = 0.48
+        self.sim_threshold_global = 0.75  # Increased from 0.48 for higher accuracy
 
     # ---------- DB ----------
     def ensure_tables(self):
@@ -238,8 +279,11 @@ class ProductScannerSQL:
         ocr_text = extract_ocr_text(img_array)
         numeric = extract_numeric_cues(ocr_text)
         global_hist = global_hsv_hist(img_array)
+        dominant_colors = extract_dominant_colors(img_array, k=5)  # Top 5 dominant colors
+        color_moments_feat = color_moments(img_array)
         return {"cnn": cnn_global, "cnn_local": cnn_local,
-                "ocr_text": ocr_text, "numeric": numeric, "global_hist": global_hist}
+                "ocr_text": ocr_text, "numeric": numeric, "global_hist": global_hist,
+                "dominant_colors": dominant_colors, "color_moments": color_moments_feat}
 
     def _build_vectors(self, payload):
         cnn_global = payload["cnn"]
@@ -247,6 +291,9 @@ class ProductScannerSQL:
         ocr_text = payload["ocr_text"]
         numeric = payload["numeric"]
         global_hist = payload["global_hist"]
+        # Handle backward compatibility for old payloads
+        dominant_colors = payload.get("dominant_colors", np.zeros(15, dtype=np.float32))  # 5 colors * 3 channels
+        color_moments_feat = payload.get("color_moments", np.zeros(9, dtype=np.float32))  # 3 channels * 3 moments
 
         # Coarse uses global CNN only
         if self.pca is not None and self.use_pca:
@@ -262,12 +309,14 @@ class ProductScannerSQL:
         else:
             tfidf = np.zeros((256,), dtype=np.float32)
 
-        # Fine vector (multi-modal + local)
+        # Fine vector (multi-modal + local + enhanced color)
         fine = np.concatenate([
             coarse,                 # global
             0.8 * local_reduced,    # local emphasis
             3.0 * tfidf,            # OCR weighted
-            global_hist,
+            5.0 * global_hist,      # HSV histogram weighted higher
+            8.0 * dominant_colors,  # Dominant colors heavily weighted
+            6.0 * color_moments_feat, # Color moments weighted
             10.0 * numeric          # numeric weighted
         ], axis=0).astype(np.float32)
 
@@ -322,7 +371,7 @@ class ProductScannerSQL:
     # ---------- Training ----------
     def train(self):
         self.cursor.execute("""
-            SELECT pv.file_path, p.name, p.sku
+            SELECT pv.file_path, p.name
             FROM product_vectors pv
             JOIN products p ON p.id = pv.product_id
         """)
@@ -333,10 +382,10 @@ class ProductScannerSQL:
             return False
 
         payloads, labels, paths = [], [], []
-        for file_path, name, sku in rows:
+        for file_path, name in rows:
             try:
                 payloads.append(joblib.load(file_path))
-                labels.append(sku)
+                labels.append(name)
                 paths.append(file_path)
             except Exception as e:
                 print(f"⚠️ Could not load {file_path}: {e}")
@@ -470,6 +519,31 @@ class ProductScannerSQL:
         except Exception:
             return 0.0
 
+    def _calculate_color_similarity(self, q_payload, r_payload):
+        """Calculate color similarity between query and reference payloads."""
+        # Dominant colors similarity
+        q_colors = q_payload.get("dominant_colors", np.zeros(15, dtype=np.float32))
+        r_colors = r_payload.get("dominant_colors", np.zeros(15, dtype=np.float32))
+        
+        if np.linalg.norm(q_colors) > 0 and np.linalg.norm(r_colors) > 0:
+            color_sim = float(np.dot(q_colors, r_colors) / 
+                            ((np.linalg.norm(q_colors) + 1e-8) * (np.linalg.norm(r_colors) + 1e-8)))
+        else:
+            color_sim = 0.0
+        
+        # Color moments similarity
+        q_moments = q_payload.get("color_moments", np.zeros(9, dtype=np.float32))
+        r_moments = r_payload.get("color_moments", np.zeros(9, dtype=np.float32))
+        
+        if np.linalg.norm(q_moments) > 0 and np.linalg.norm(r_moments) > 0:
+            moments_sim = float(np.dot(q_moments, r_moments) / 
+                              ((np.linalg.norm(q_moments) + 1e-8) * (np.linalg.norm(r_moments) + 1e-8)))
+        else:
+            moments_sim = 0.0
+        
+        # Combine with weights (dominant colors more important)
+        return 0.7 * color_sim + 0.3 * moments_sim
+
     # ---------- Recognition ----------
     def recognize(self, img_array):
         if not self.is_trained and not self.train():
@@ -540,6 +614,10 @@ class ProductScannerSQL:
             else:
                 sim_num = 0.0
 
+            # NEW: Color similarity
+            r_payload = joblib.load(self.file_paths[i])
+            sim_color = self._calculate_color_similarity(q_payload, r_payload)
+
             # ref numeric in human units
             r_percent = rn[0] * 10.0 if rn[0] > 0 else None
             r_volume  = rn[2] * 1000.0 if rn[2] > 0 else None
@@ -551,7 +629,7 @@ class ProductScannerSQL:
             if q_volume  is not None and r_volume  is not None and abs(q_volume - r_volume) > ML_TOL:
                 penalty += 0.15
 
-            score = (0.50*base_sim + 0.30*sim_visual + 0.15*sim_ocr + 0.05*sim_num) - penalty
+            score = (0.40*base_sim + 0.25*sim_visual + 0.15*sim_ocr + 0.05*sim_num + 0.15*sim_color) - penalty
             return score
 
         prelim = []
@@ -581,11 +659,11 @@ class ProductScannerSQL:
                 print(f"❌ Rejected by % mismatch: query {q_percent} vs ref {r_percent}")
                 return None
 
-        # Centroid-based acceptance (class-agnostic)
+        # Centroid-based acceptance (class-agnostic) - relaxed threshold
         c, mu, sigma = self.sku_stats.get(best_label, (None, 0.3, 0.1))
         if c is not None:
             dist_to_centroid = 1.0 - float(np.dot(qf, c))
-            if dist_to_centroid > (mu + 2.0*sigma):
+            if dist_to_centroid > (mu + 3.0*sigma):  # Relaxed from 2.0 to 3.0
                 return None
 
         confidence = max(0.0, min(1.0, best_score))
@@ -609,6 +687,26 @@ def main():
         pass
 
     scanner = ProductScannerSQL(db_url=db_url)
+
+    # Quick runtime check: does this OpenCV build support GUI windows?
+    def _opencv_has_gui():
+        try:
+            # Some builds will raise on namedWindow/imshow; try minimal operations
+            cv2.namedWindow("__test_gui__", cv2.WINDOW_NORMAL)
+            cv2.imshow("__test_gui__", np.zeros((2,2,3), dtype=np.uint8))
+            cv2.waitKey(1)
+            cv2.destroyWindow("__test_gui__")
+            return True
+        except Exception:
+            return False
+
+    _GUI_AVAILABLE = _opencv_has_gui()
+    if not _GUI_AVAILABLE:
+        print("⚠️ OpenCV GUI support not available (headless or no GTK). GUI features disabled.")
+        print("🚀 Use the FastAPI endpoints instead:")
+        print("   - POST /scan - Scan a product")
+        print("   - POST /add - Add a new product")
+        return
 
     # Try multiple video devices
     video_devices = [0, 2, 1]
@@ -686,7 +784,11 @@ def main():
                                 print("❌ Capture cancelled by user.")
                                 captured = 0
                                 break
-                        cv2.destroyWindow('Capture Product Views')
+                        try:
+                            cv2.destroyWindow('Capture Product Views')
+                        except Exception:
+                            # Some OpenCV builds do not implement window functions in headless mode
+                            pass
                         if captured == 5:
                             print(f"🎉 Product '{product_name}' stored with 5 views.")
                             print("🔄 Ready for next product...")
@@ -711,7 +813,11 @@ def main():
             break
 
     cap.release()
-    cv2.destroyAllWindows()
+    try:
+        cv2.destroyAllWindows()
+    except Exception:
+        # Ignore errors when OpenCV lacks GUI support (e.g., headless Docker image)
+        pass
     print("👋 Scanner closed.")
 
 def is_running_in_container():
