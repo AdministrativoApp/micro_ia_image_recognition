@@ -121,3 +121,6 @@ logs/
 *.sqlite3
 
 productivo/
+
+# Scan cache directory
+scan_cache/

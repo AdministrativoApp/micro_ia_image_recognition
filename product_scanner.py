@@ -1,48 +1,69 @@
 import os
 import json
-import base64
+import hashlib
+import time
 import requests
 import cv2
-import numpy as np
+from pathlib import Path
 from dotenv import load_dotenv
 import easyocr
 import warnings
 
-# Suppress PyTorch warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="torch.utils.data.dataloader")
-warnings.filterwarnings("ignore", message="Neither CUDA nor MPS are available*")
-os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Disable GPU usage to avoid warnings
-
-# Load environment variables
+# Setup
+warnings.filterwarnings("ignore")
 load_dotenv()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+reader = easyocr.Reader(['es'])
 
-# Initialize OCR reader
-reader = easyocr.Reader(['en', 'es'])  # English and Spanish support
+# Cache setup
+CACHE_DIR = "./scan_cache"
+Path(CACHE_DIR).mkdir(exist_ok=True)
 
+def get_image_signature(image_path_or_array):
+    """Generate unique signature for image"""
+    if isinstance(image_path_or_array, str):
+        # For file paths, use file metadata
+        stat = os.stat(image_path_or_array)
+        return hashlib.md5(f"{image_path_or_array}_{stat.st_mtime}_{stat.st_size}".encode()).hexdigest()
+    else:
+        # For image arrays, use pixel data
+        return hashlib.md5(image_path_or_array.tobytes()).hexdigest()
 
 def extract_product_info(image_path_or_array):
     """
-    Extract product info from image using OCR + DeepSeek
+    Extract product info from image using OCR + DeepSeek WITH CACHING
     """
-
+    cache_key = get_image_signature(image_path_or_array)
+    cache_file = os.path.join(CACHE_DIR, f"{cache_key}.json")
+    
+    # Check cache first
+    if os.path.exists(cache_file):
+        if time.time() - os.path.getmtime(cache_file) < 3600:  # 1 hour cache
+            print("📦 Loading from cache...")
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cached_data = json.load(f)
+                cached_data['cached'] = True
+                return cached_data
+        else:
+            # Cache expired
+            os.remove(cache_file)
+    
+    # Not in cache - process normally
+    print("🔄 Processing fresh scan...")
+    
     # Prepare image
     if isinstance(image_path_or_array, str):
-        # Read from file path
         img = cv2.imread(image_path_or_array)
     else:
-        # Assume it's already a numpy array
         img = image_path_or_array
 
     if img is None:
         return {"error": "Could not load image"}
 
     # Step 1: Extract text using OCR
-    print("Running OCR...")
     try:
         results = reader.readtext(img)
         extracted_text = " ".join([text for (_, text, _) in results])
-        # print(f"OCR Text: {extracted_text[:200]}...")  # Show first 200 chars
     except Exception as e:
         print(f"OCR failed: {e}")
         return {"error": f"OCR failed: {str(e)}"}
@@ -51,62 +72,16 @@ def extract_product_info(image_path_or_array):
         return {"error": "No text found in image"}
 
     # Step 2: Send extracted text to DeepSeek for parsing
-    prompt = f"""
-    Analyze this veterinary product text extracted from OCR and extract ALL available information as a JSON object:
-
-    Text: "{extracted_text}"
-
-    Return a JSON object with ALL information you can extract from the text:
-
-    CRITICAL Rules:
-    - Return ONLY a valid JSON object, no other text, no explanations, no markdown
-    - Fix OCR errors: "mu" = "ml", "lugectalsle" = "inyectable", "3,15" = 3.15, etc.
-    - Extract EVERY piece of information you can identify
-    - Use null for missing information, not empty strings
-    - Be thorough - veterinary product labels contain critical information
-    - If uncertain about a field, use null rather than guessing
-    - Numbers should use dots as decimals (3.15 not 3,15)
-    - If the value is null, do not include it in the JSON
-    - Recognize details like dots, colors, shapes, etc, small details that differ from other products
-    - JSON format example:
-    {{
-        "product_name": "Ivermectina 1%",
-        "active_ingredient": "Ivermectina",
-        "concentration": "1%",
-        "formulation": "Oral solution",
-        "volume": "100 ml",
-        "indications": "For the treatment of parasitic infections in cattle",
-        "dosage": "0.2 mg/kg body weight",
-        "administration_route": "Oral",
-        "warnings": "Do not use in animals intended for human consumption",
-        "storage_conditions": "Store below 30°C",
-        "manufacturer": "VetPharma Inc.",
-        "batch_number": "B12345",
-        "expiration_date": "2024-12-31",
-        "lot_number": "L67890",
-        "barcode": "0123456789012",
-        "color": "Yellow",
-        "shape": "Bottle with dropper",
-        "other_details": "Shake well before use"
-    }}
-    """
-
-    # API request
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
+    short_prompt = f"""Extract veterinary product info as JSON from: {extracted_text}
+    Return only: product_name, active_ingredient, concentration, formulation, volume, manufacturer
+    Use null for missing fields. JSON only, no explanations."""
+    
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
     payload = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
+        "model": "deepseek-chat", 
+        "messages": [{"role": "user", "content": short_prompt}],
         "temperature": 0.1,
-        "max_tokens": 1000
+        "max_tokens": 400
     }
 
     try:
@@ -116,8 +91,6 @@ def extract_product_info(image_path_or_array):
             json=payload,
             timeout=30
         )
-
-        print(f"API Status: {response.status_code}")
 
         if response.status_code == 200:
             result = response.json()
@@ -133,22 +106,26 @@ def extract_product_info(image_path_or_array):
 
             # Parse JSON
             parsed_data = json.loads(content)
+            
+            # Cache the result if successful
+            if 'error' not in parsed_data:
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(parsed_data, f, ensure_ascii=False)
+                parsed_data['cached'] = False
+            
             return parsed_data
         else:
-            print(f"API Error: {response.text}")
             return {"error": f"API returned status {response.status_code}"}
 
     except Exception as e:
-        print(f"Exception: {str(e)}")
         return {"error": str(e)}
 
-# Test function
-def test_extraction():
-    """Test the extraction with your image"""
-    # Test with your image file
-    result = extract_product_info("ivermectine2.jpeg")
-    print("Extraction result:")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+# # Test function
+# def test_extraction():
+#     """Test the extraction with your image"""
+#     result = extract_product_info("ivermectine2.jpeg")
+#     print("Extraction result:")
+#     print(json.dumps(result, indent=2, ensure_ascii=False))
 
-if __name__ == "__main__":
-    test_extraction()
+# if __name__ == "__main__":
+#     test_extraction()
