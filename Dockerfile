@@ -31,13 +31,21 @@ RUN python -m pip install --upgrade pip setuptools wheel
 # Copy requirements first for better caching
 COPY requirements.txt .
 
+# Fix incompatible versions before installing requirements
+RUN sed -i 's/networkx==3.5/networkx==3.4.2/g' requirements.txt && \
+    sed -i 's/numpy==2.2.6/numpy==1.24.3/g' requirements.txt && \
+    sed -i 's/fastapi==0.116.1/fastapi==0.104.1/g' requirements.txt && \
+    sed -i 's/uvicorn==0.35.0/uvicorn==0.22.0/g' requirements.txt && \
+    sed -i 's/scipy==1.16.1/scipy==1.11.3/g' requirements.txt
+
 # Install all requirements from your file
 RUN pip install -r requirements.txt
 
 # Verify key packages
-RUN python -c "import easyocr; print('EasyOCR version:', easyocr.__version__)"
-RUN python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
-RUN python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)"
+RUN python -c "import easyocr; print('EasyOCR version:', easyocr.__version__)" && \
+    python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)" && \
+    python -c "import mediapipe as mp; print('MediaPipe', mp.__version__)" && \
+    python -c "import networkx; print('NetworkX version:', networkx.__version__)"
 
 # App
 COPY . .
