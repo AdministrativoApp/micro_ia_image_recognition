@@ -28,7 +28,8 @@ from product_scanner import extract_product_info  # OCR + DeepSeek
 app = FastAPI(
     title="Product Recognition API",
     description="Canonical JSON + token pruning + 0.85 similarity.",
-    version="6.0.0"
+    version="6.0.0",
+    root_path="/despacho"
 )
 
 app.add_middleware(
