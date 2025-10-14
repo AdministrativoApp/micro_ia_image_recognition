@@ -6,7 +6,7 @@ services:
     container_name: micro_ia
     restart: always
     ports:
-      - "8000:8000"  # expose FastAPI port
+      - "8080:8080"  # expose FastAPI port
     env_file:
       - .env  # ✅ Read variables like DB_USER, DB_PASSWORD, etc.
     volumes:

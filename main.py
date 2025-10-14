@@ -269,7 +269,7 @@ async def list_all(limit: int = 100, offset: int = 0):
 
 # scan: parse image → canonicalize → prune via tokens/numbers → score → accept if ≥ threshold
 # Not recognized paths return body [] and signal via headers
-@app.post("/despacho/scan")
+@app.post("/scan")
 async def scan(
     file: UploadFile = File(...),
     threshold: float = Query(MATCH_THRESHOLD, ge=0.0, le=0.999),
