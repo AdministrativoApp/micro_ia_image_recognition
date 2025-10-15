@@ -1,4 +1,18 @@
 import os
+
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("TORCH_CPP_LOG_LEVEL", "ERROR")
+
+try:
+    import torch
+    torch.set_num_threads(4)
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
+
 import re
 import time
 import uuid
@@ -389,3 +403,6 @@ async def scan(
                 "X-Scan-Threshold": str(threshold),
             },
         )
+
+
+# uvicorn main:app --reload --port 8080
