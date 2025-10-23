@@ -5,13 +5,26 @@ services:
     image: andresdom2004/micro_ia_image_recognition:latest
     container_name: micro_ia
     restart: always
-    ports:
-      - "8080:8080"  # expose FastAPI port
+    # No external ports - nginx handles SSL
     env_file:
-      - .env  # ✅ Read variables like DB_USER, DB_PASSWORD, etc.
+      - .env
     volumes:
-      - ./features:/app/features  # persist feature vectors
-      - ./ssl:/app/ssl  # Mount SSL certificates
+      - ./features:/app/features
+    networks:
+      - app-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx_ssl
+    restart: always
+    ports:
+      - "80:80"   # HTTP redirect to HTTPS
+      - "443:443" # SSL endpoint
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./ssl:/app/ssl
+    depends_on:
+      - micro-ia
     networks:
       - app-network
 
@@ -21,7 +34,6 @@ services:
     restart: always
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./ssl:/app/ssl  # Mount SSL certificates
     environment:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_POLL_INTERVAL=360
