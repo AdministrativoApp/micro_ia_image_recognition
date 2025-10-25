@@ -25,7 +25,7 @@ COPY . .
 RUN mkdir -p features
 
 # Expose ports
-EXPOSE 443 8000
+EXPOSE 8000
 
-# Run with SSL
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "443", "--ssl-keyfile", "/app/ssl/key.pem", "--ssl-certfile", "/app/ssl/cert.pem"]
+# Run without SSL (Nginx handles SSL)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
