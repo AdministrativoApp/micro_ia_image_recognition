@@ -37,12 +37,12 @@ MATCH_THRESHOLD = float(os.getenv("MATCH_THRESHOLD", "0.85"))
 from product_store import (
     upsert_product_struct, get_product, list_products, search_candidates_by_tokens, ensure_tables
 )
-from product_scanner import extract_product_info  # OCR + DeepSeek
+from product_scanner import extract_product_info  # Updated DeepSeek Vision OCR
 
 app = FastAPI(
     title="Product Recognition API",
-    description="Canonical JSON + token pruning + 0.85 similarity.",
-    version="6.0.0",
+    description="Canonical JSON + token pruning + 0.85 similarity. Enhanced with DeepSeek Vision OCR",
+    version="7.0.0",
     root_path="/despacho"
 )
 
@@ -98,6 +98,28 @@ def _parse_ml(x: Optional[str]) -> Optional[float]:
         if 10 <= v <= 5000: return v
     return None
 
+def _parse_tablets(x: Optional[str]) -> Optional[int]:
+    """Parse tablet/unit count from usage_instructions or other text fields"""
+    if not x: return None
+    xl = x.lower()
+    
+    # Look for tablet counts
+    tablet_patterns = [
+        r"(\d+)\s*(?:comp|tabletas?|tabs?)\b",
+        r"(\d+)\s*(?:unidades?|units?)\b",
+        r"caja\s+de\s+(\d+)\s*(?:comp|tabletas?)",
+        r"(\d+)\s*\.?\s*comp",
+    ]
+    
+    for pattern in tablet_patterns:
+        m = re.search(pattern, xl)
+        if m:
+            try:
+                return int(m.group(1))
+            except:
+                continue
+    return None
+
 def build_canonical(raw: Dict[str, Any], sku: Optional[str] = None) -> Dict[str, Any]:
     # map many possible keys → mandatory schema
     name = raw.get("product_name") or raw.get("product_title")
@@ -105,6 +127,11 @@ def build_canonical(raw: Dict[str, Any], sku: Optional[str] = None) -> Dict[str,
     active = raw.get("active_ingredient")
     formulation = raw.get("formulation") or raw.get("dosage_form")
     keywords = raw.get("keywords") or raw.get("other_details")
+    
+    # Enhanced extraction from new fields
+    usage_instructions = raw.get("usage_instructions")
+    presentation_details = raw.get("presentation_details")
+    warnings = raw.get("warnings")
 
     pct = raw.get("percent")
     if pct is None:
@@ -113,6 +140,13 @@ def build_canonical(raw: Dict[str, Any], sku: Optional[str] = None) -> Dict[str,
     vol = raw.get("volume_ml")
     if vol is None:
         vol = _parse_ml(str(raw.get("volume") or name or ""))
+    
+    # Extract tablet count from usage instructions or presentation details
+    tablets = None
+    if usage_instructions:
+        tablets = _parse_tablets(usage_instructions)
+    if tablets is None and presentation_details:
+        tablets = _parse_tablets(presentation_details)
 
     # normalize
     name_n = _norm_text(name) or None
@@ -127,6 +161,17 @@ def build_canonical(raw: Dict[str, Any], sku: Optional[str] = None) -> Dict[str,
     else:
         kw = []
 
+    # Build enhanced extras with new fields
+    extras = {
+        "route": _norm_text(raw.get("administration_route")) or None,
+        "species": _norm_text(raw.get("species")) or None,
+        "color_badge": _norm_text(raw.get("color") or raw.get("badge_color")) or None,
+        "language": _norm_text(raw.get("language")) or None,
+        "presentation_details": _norm_text(presentation_details) or None,
+        "usage_instructions": _norm_text(usage_instructions) or None,
+        "warnings": _norm_text(warnings) or None
+    }
+
     canon = {
         "sku": sku or raw.get("sku"),
         "name": name_n,
@@ -135,13 +180,9 @@ def build_canonical(raw: Dict[str, Any], sku: Optional[str] = None) -> Dict[str,
         "concentration_pct": float(pct) if isinstance(pct, (int, float, str)) and str(pct) else None,
         "formulation": form_n,
         "volume_ml": float(vol) if isinstance(vol, (int, float, str)) and str(vol) else None,
+        "tablet_count": tablets,
         "keywords": (kw[:8] or None),
-        "extras": {
-            "route": _norm_text(raw.get("administration_route")) or None,
-            "species": _norm_text(raw.get("species")) or None,
-            "color_badge": _norm_text(raw.get("color") or raw.get("badge_color")) or None,
-            "language": _norm_text(raw.get("language")) or None
-        }
+        "extras": extras
     }
     return canon
 
@@ -154,6 +195,14 @@ def tokens_from_canon(c: Dict[str, Any]) -> List[str]:
             toks.extend([t for t in re.split(r"[^a-z0-9]+", v) if t])
     if c.get("keywords"):
         toks.extend([t for t in c["keywords"] if t])
+    
+    # Extract tokens from enhanced extras
+    extras = c.get("extras", {})
+    for field in ["presentation_details", "usage_instructions", "warnings"]:
+        value = extras.get(field)
+        if value:
+            toks.extend([t for t in re.split(r"[^a-z0-9]+", value) if len(t) > 2])  # Only tokens > 2 chars
+    
     # coarse numeric bins to help filter by value
     if c.get("concentration_pct") is not None:
         pct_bin = round(float(c["concentration_pct"])*20)/20.0  # ~0.05 bins
@@ -162,6 +211,11 @@ def tokens_from_canon(c: Dict[str, Any]) -> List[str]:
         ml = float(c["volume_ml"])
         ml_bin = int(round(ml/25.0)*25)  # 25 mL buckets
         toks.append(f"ml:{ml_bin}")
+    if c.get("tablet_count") is not None:
+        tablets = int(c["tablet_count"])
+        tablet_bin = int(round(tablets/10.0)*10)  # 10 tablet buckets
+        toks.append(f"tabs:{tablet_bin}")
+    
     # dedupe
     seen = set()
     out = []
@@ -191,7 +245,13 @@ def _set_jaccard(a: Optional[List[str]], b: Optional[List[str]]) -> float:
     return len(A & B) / max(1, len(A | B))
 
 def score_objects(q: Dict[str, Any], ref: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
-    w = {"name":0.35,"brand":0.15,"active":0.15,"concentration_pct":0.15,"volume_ml":0.12,"formulation":0.05,"keywords":0.03}
+    # Updated weights to include new fields
+    w = {
+        "name": 0.30, "brand": 0.15, "active": 0.15, 
+        "concentration_pct": 0.12, "volume_ml": 0.10, "tablet_count": 0.08,
+        "formulation": 0.05, "keywords": 0.05
+    }
+    
     parts = {
         "name": _fuzzy(q.get("name"), ref.get("name")),
         "brand": _fuzzy(q.get("brand"), ref.get("brand")),
@@ -199,6 +259,7 @@ def score_objects(q: Dict[str, Any], ref: Dict[str, Any]) -> Tuple[float, Dict[s
         "formulation": _fuzzy(q.get("formulation"), ref.get("formulation")),
         "concentration_pct": _num_sim(q.get("concentration_pct"), ref.get("concentration_pct"), tol_abs=0.08),
         "volume_ml": _num_sim(q.get("volume_ml"), ref.get("volume_ml"), tol_abs=30.0),
+        "tablet_count": _num_sim(q.get("tablet_count"), ref.get("tablet_count"), tol_abs=5.0),
         "keywords": _set_jaccard(q.get("keywords"), ref.get("keywords")),
     }
     score = sum(w[k]*parts[k] for k in w.keys())
@@ -207,7 +268,7 @@ def score_objects(q: Dict[str, Any], ref: Dict[str, Any]) -> Tuple[float, Dict[s
 # ─────────────────────── endpoints ───────────────────────
 @app.get("/")
 async def root():
-    return {"message": "Product Recognition API is running"}
+    return {"message": "Product Recognition API is running - Enhanced with DeepSeek Vision OCR"}
 
 @app.post("/selftest")
 async def selftest(file: UploadFile = File(...), preview_pruning: bool = True):
@@ -226,6 +287,7 @@ async def selftest(file: UploadFile = File(...), preview_pruning: bool = True):
             tokens=tokens,
             pct=canon.get("concentration_pct"),
             vol_ml=canon.get("volume_ml"),
+            tablet_count=canon.get("tablet_count"),  # New parameter
             limit=50
         )
 
@@ -317,6 +379,7 @@ async def scan(
             q.get("name"), q.get("brand"), q.get("active"),
             q.get("concentration_pct") is not None,
             q.get("volume_ml") is not None,
+            q.get("tablet_count") is not None,  # New signal check
             bool(q.get("keywords"))
         ])
         if not has_signal:
@@ -336,6 +399,7 @@ async def scan(
             tokens,
             q.get("concentration_pct"),
             q.get("volume_ml"),
+            q.get("tablet_count"),  # New parameter
             limit=max_candidates
         ) or []
 
@@ -393,7 +457,9 @@ async def scan(
             },
         )
 
-    except Exception:
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Scan error: {str(e)}")
         return JSONResponse(
             content=[],
             status_code=200,
