@@ -1,5 +1,5 @@
+# product_store.py
 import os
-import uuid
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -21,29 +21,17 @@ def _db():
 def ensure_tables():
     with _db() as conn, conn.cursor() as cur:
         cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
-        cur.execute('CREATE EXTENSION IF NOT EXISTS "pg_trgm";')
         cur.execute("""
         CREATE TABLE IF NOT EXISTS products (
-            id      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            sku     TEXT NOT NULL UNIQUE,
-            canon   JSONB NOT NULL,            -- mandatory canonical structure
-            tokens  TEXT[] NOT NULL,           -- search tokens
-            pct     DOUBLE PRECISION,          -- concentration_pct
-            vol_ml  DOUBLE PRECISION,          -- volume_ml
+            id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            sku        TEXT NOT NULL UNIQUE,
+            canon      JSONB NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """)
         
-        # Check if tablet_count column exists, if not add it
-        cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='products' and column_name='tablet_count';
-        """)
-        if not cur.fetchone():
-            cur.execute("ALTER TABLE products ADD COLUMN tablet_count INTEGER;")
-        
+        # Create updated_at trigger
         cur.execute("""
         CREATE OR REPLACE FUNCTION set_updated_at()
         RETURNS TRIGGER AS $$
@@ -53,62 +41,50 @@ def ensure_tables():
         END;
         $$ LANGUAGE plpgsql;
         """)
+        
         cur.execute("""
         DROP TRIGGER IF EXISTS trg_products_updated_at ON products;
         CREATE TRIGGER trg_products_updated_at
         BEFORE UPDATE ON products
-        FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
         """)
-        # Indexes for pruning
-        cur.execute("""CREATE INDEX IF NOT EXISTS idx_products_tokens_gin ON products USING GIN (tokens);""")
-        cur.execute("""CREATE INDEX IF NOT EXISTS idx_products_pct ON products (pct);""")
-        cur.execute("""CREATE INDEX IF NOT EXISTS idx_products_vol ON products (vol_ml);""")
         
-        # Create tablet_count index if it doesn't exist
+        # Indexes on JSONB fields for performance
         cur.execute("""
-            SELECT indexname FROM pg_indexes 
-            WHERE tablename = 'products' AND indexname = 'idx_products_tablet_count';
+        CREATE INDEX IF NOT EXISTS idx_products_sku ON products (sku);
+        CREATE INDEX IF NOT EXISTS idx_canon_name ON products ((canon->>'name'));
+        CREATE INDEX IF NOT EXISTS idx_canon_brand ON products ((canon->>'brand'));
+        CREATE INDEX IF NOT EXISTS idx_canon_active ON products ((canon->>'active'));
+        CREATE INDEX IF NOT EXISTS idx_canon_concentration_pct ON products (((canon->'concentration_pct')::float8));
+        CREATE INDEX IF NOT EXISTS idx_canon_volume_ml ON products (((canon->'volume_ml')::float8));
+        CREATE INDEX IF NOT EXISTS idx_canon_tablet_count ON products (((canon->'tablet_count')::int));
         """)
-        if not cur.fetchone():
-            cur.execute("""CREATE INDEX idx_products_tablet_count ON products (tablet_count);""")
         
         conn.commit()
-
-ensure_tables()
 
 # ────────────────────────────── CRUD ──────────────────────────────
 def upsert_product_struct(
     sku: str,
     canon: Dict[str, Any],
-    tokens: List[str],
+    tokens: List[str],  # kept for API compatibility, but not stored
 ) -> Dict[str, Any]:
     """
     Upsert canonical product row. Returns stored row.
+    Note: 'tokens' is not stored in DB (all data lives in 'canon' JSONB).
     """
     if not isinstance(canon, dict):
         raise ValueError("canon must be a JSON object")
-    if not isinstance(tokens, list):
-        raise ValueError("tokens must be a list")
 
-    payload = json.dumps(canon)
     with _db() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO products (sku, canon, tokens, pct, vol_ml, tablet_count)
-            VALUES (%s, %s::jsonb, %s::text[], %s, %s, %s)
+            INSERT INTO products (sku, canon)
+            VALUES (%s, %s::jsonb)
             ON CONFLICT (sku) DO UPDATE SET
-              canon        = EXCLUDED.canon,
-              tokens       = EXCLUDED.tokens,
-              pct          = EXCLUDED.pct,
-              vol_ml       = EXCLUDED.vol_ml,
-              tablet_count = EXCLUDED.tablet_count
-            RETURNING id, sku, canon, tokens, pct, vol_ml, tablet_count, created_at, updated_at;
+                canon = EXCLUDED.canon
+            RETURNING id, sku, canon, created_at, updated_at;
         """, (
             sku.strip(),
-            payload,
-            tokens,
-            canon.get("concentration_pct"),
-            canon.get("volume_ml"),
-            canon.get("tablet_count")
+            json.dumps(canon)
         ))
         row = cur.fetchone()
         conn.commit()
@@ -117,7 +93,7 @@ def upsert_product_struct(
 def get_product(sku: str) -> Optional[Dict[str, Any]]:
     with _db() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT id, sku, canon, tokens, pct, vol_ml, tablet_count, created_at, updated_at
+            SELECT id, sku, canon, created_at, updated_at
             FROM products WHERE sku = %s;
         """, (sku.strip(),))
         return cur.fetchone()
@@ -125,7 +101,7 @@ def get_product(sku: str) -> Optional[Dict[str, Any]]:
 def list_products(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     with _db() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT id, sku, canon, tokens, pct, vol_ml, tablet_count, created_at, updated_at
+            SELECT id, sku, canon, created_at, updated_at
             FROM products
             ORDER BY updated_at DESC
             LIMIT %s OFFSET %s;
@@ -141,102 +117,75 @@ def search_candidates_by_tokens(
     limit: int = 200
 ) -> List[Dict[str, Any]]:
     """
-    Prune to likely matches using token overlap and coarse numeric filters.
-    Enhanced with tablet count support for medication products.
+    Search using JSONB fields and token-based filtering in Python.
+    Since we don't store 'tokens' in DB, we rely on JSONB indexes + post-filtering.
     """
-    tok = [t for t in tokens if t]
-    if not tok:
-        tok = ["__empty__"]  # will likely return none
-
-    # Build WHERE conditions dynamically
-    where_conditions = ["tokens && %s::text[]"]
-    params = [tok]
-
-    # Concentration filter
-    if pct is not None:
-        pct_low = pct - 0.1
-        pct_hi = pct + 0.1
-        where_conditions.append("pct BETWEEN %s AND %s")
-        params.extend([pct_low, pct_hi])
-
-    # Volume filter
-    if vol_ml is not None:
-        vol_low = vol_ml - 80
-        vol_hi = vol_ml + 80
-        where_conditions.append("vol_ml BETWEEN %s AND %s")
-        params.extend([vol_low, vol_hi])
-
-    # Tablet count filter - only apply if column exists and value is provided
-    if tablet_count is not None:
-        # For tablets, use a tighter tolerance since counts are discrete
-        tab_low = tablet_count - 5
-        tab_hi = tablet_count + 5
-        where_conditions.append("tablet_count BETWEEN %s AND %s")
-        params.extend([tab_low, tab_hi])
-
-    # Build the base SQL
-    sql = f"""
-        SELECT sku, canon, tokens, pct, vol_ml, tablet_count
-        FROM products
-        WHERE {" AND ".join(where_conditions)}
-    """
-
-    # Add ordering - handle potential NULL values for tablet_count
-    sql += """
-        ORDER BY 
-            -- Prioritize exact matches on key numeric fields
-            CASE WHEN pct = %s THEN 0 ELSE 1 END,
-            CASE WHEN vol_ml = %s THEN 0 ELSE 1 END,
-            updated_at DESC
-        LIMIT %s;
-    """
-    
-    # Add exact match parameters for ordering
-    params.extend([pct, vol_ml, limit])
-
     with _db() as conn, conn.cursor() as cur:
-        cur.execute(sql, params)
-        return cur.fetchall()
+        # Base query with dynamic filters
+        where_clauses = []
+        params = []
 
-# ────────────────────────────── Enhanced search methods ──────────────────────────────
-def search_products_by_text(
-    query: str,
-    limit: int = 50
-) -> List[Dict[str, Any]]:
-    """
-    Search products by text in name, brand, active ingredient, etc.
-    Uses PostgreSQL full-text search capabilities.
-    """
+        # Concentration filter
+        if pct is not None:
+            where_clauses.append("ABS((canon->>'concentration_pct')::float8 - %s) <= 0.1")
+            params.append(pct)
+
+        # Volume filter
+        if vol_ml is not None:
+            where_clauses.append("ABS((canon->>'volume_ml')::float8 - %s) <= 80")
+            params.append(vol_ml)
+
+        # Tablet count filter
+        if tablet_count is not None:
+            where_clauses.append("ABS((canon->>'tablet_count')::int - %s) <= 5")
+            params.append(tablet_count)
+
+        # Build query
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+        else:
+            where_sql = ""
+
+        sql = f"""
+            SELECT sku, canon
+            FROM products
+            {where_sql}
+            ORDER BY updated_at DESC
+            LIMIT %s;
+        """
+        params.append(limit)
+
+        cur.execute(sql, params)
+        candidates = cur.fetchall()
+
+        # 🔍 Optional: Add token-based filtering in Python (if needed)
+        # For now, rely on numeric pruning + full scoring in main.py
+        return candidates
+
+# ────────────────────────────── Other search methods ──────────────────────────────
+def search_products_by_text(query: str, limit: int = 50) -> List[Dict[str, Any]]:
     with _db() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT sku, canon, tokens, pct, vol_ml, tablet_count
+            SELECT sku, canon
             FROM products
             WHERE 
-                tokens && regexp_split_to_array(lower(%s), '[^a-z0-9]+') OR
                 canon->>'name' ILIKE %s OR
                 canon->>'brand' ILIKE %s OR
                 canon->>'active' ILIKE %s
             ORDER BY updated_at DESC
             LIMIT %s;
         """, (
-            query.lower(),
             f"%{query}%",
-            f"%{query}%", 
+            f"%{query}%",
             f"%{query}%",
             limit
         ))
         return cur.fetchall()
 
-def get_products_by_manufacturer(
-    manufacturer: str,
-    limit: int = 100
-) -> List[Dict[str, Any]]:
-    """
-    Get products by manufacturer/brand name.
-    """
+def get_products_by_manufacturer(manufacturer: str, limit: int = 100) -> List[Dict[str, Any]]:
     with _db() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT sku, canon, tokens, pct, vol_ml, tablet_count
+            SELECT sku, canon
             FROM products
             WHERE canon->>'brand' ILIKE %s
             ORDER BY canon->>'name', updated_at DESC
@@ -244,22 +193,14 @@ def get_products_by_manufacturer(
         """, (f"%{manufacturer}%", limit))
         return cur.fetchall()
 
-def get_similar_products(
-    sku: str,
-    limit: int = 20
-) -> List[Dict[str, Any]]:
-    """
-    Find products similar to the given SKU based on tokens and characteristics.
-    """
+def get_similar_products(sku: str, limit: int = 20) -> List[Dict[str, Any]]:
     product = get_product(sku)
     if not product:
         return []
     
-    canon = product.get('canon', {})
-    tokens = product.get('tokens', [])
-    
+    canon = product['canon']
     return search_candidates_by_tokens(
-        tokens=tokens,
+        tokens=[],  # not used
         pct=canon.get('concentration_pct'),
         vol_ml=canon.get('volume_ml'),
         tablet_count=canon.get('tablet_count'),
@@ -268,26 +209,21 @@ def get_similar_products(
 
 # ────────────────────────────── Database maintenance ──────────────────────────────
 def get_database_info() -> Dict[str, Any]:
-    """
-    Get database information including column structure.
-    """
     with _db() as conn, conn.cursor() as cur:
-        # Get table info
         cur.execute("""
             SELECT 
                 COUNT(*) as total_products,
-                COUNT(tablet_count) as products_with_tablet_count,
-                AVG(pct) as avg_concentration,
-                AVG(vol_ml) as avg_volume,
-                AVG(tablet_count) as avg_tablet_count
-            FROM products;
+                AVG((canon->>'concentration_pct')::float8) as avg_concentration,
+                AVG((canon->>'volume_ml')::float8) as avg_volume,
+                AVG((canon->>'tablet_count')::int) as avg_tablet_count
+            FROM products
+            WHERE canon ? 'concentration_pct' OR canon ? 'volume_ml' OR canon ? 'tablet_count';
         """)
         stats = cur.fetchone()
         
-        # Get column info
         cur.execute("""
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
             WHERE table_name = 'products'
             ORDER BY ordinal_position;
         """)
