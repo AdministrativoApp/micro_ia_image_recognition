@@ -21,8 +21,8 @@ COPY . .
 # Create features directory if needed
 RUN mkdir -p features
 
-# Expose port
-EXPOSE 8000
+# Expose port used by Uvicorn inside the container
+EXPOSE 8080
 
-# Run without SSL (nginx will handle SSL termination)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run without SSL (Nginx handles SSL termination at the proxy)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
