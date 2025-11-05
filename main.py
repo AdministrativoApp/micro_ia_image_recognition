@@ -144,18 +144,16 @@ def _fuzzy(a: Optional[str], b: Optional[str]) -> float:
 
 def score_objects(q: Dict[str, Any], ref: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
     w = {
-        "product_name": 0.4,
-        "active_ingredient": 0.3,
-        "concentration": 0.2,
-        "manufacturer": 0.1
+        "product_name": 0.35,
+        "active_ingredient": 0.25,
+        "concentration": 0.15,
+        "manufacturer": 0.10,
+        "all_visible_text": 0.15,  # ✅ General differentiator
     }
     
-    parts = {
-        "product_name": _fuzzy(q.get("product_name"), ref.get("product_name")),
-        "active_ingredient": _fuzzy(q.get("active_ingredient"), ref.get("active_ingredient")),
-        "concentration": _fuzzy(q.get("concentration"), ref.get("concentration")),
-        "manufacturer": _fuzzy(q.get("manufacturer"), ref.get("manufacturer")),
-    }
+    parts = {}
+    for k in w.keys():
+        parts[k] = _fuzzy(q.get(k), ref.get(k))
     
     score = sum(w[k] * parts[k] for k in w.keys())
     return score, parts

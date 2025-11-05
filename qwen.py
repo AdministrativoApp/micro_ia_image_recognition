@@ -77,6 +77,6 @@ def analyze_with_qwen_vl_modelstudio(image_path):
 
 # Test
 if __name__ == "__main__":
-    result = analyze_with_qwen_vl_modelstudio("image2.jpeg")
+    result = analyze_with_qwen_vl_modelstudio("Estrepen100.jpeg")
     print("\n📊 Final Result:")
     print(json.dumps(result, indent=2, ensure_ascii=False))
